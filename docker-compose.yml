@@ -1,0 +1,55 @@
+services:
+  db:
+    profiles: ["local-db"]
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-vrp_planner}
+      POSTGRES_USER: ${POSTGRES_USER:-vrp_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+    environment:
+      APP_NAME: vrp_dispatch_optimizer
+      APP_ENV: dev
+      APP_HOST: 0.0.0.0
+      APP_PORT: 8080
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://vrp_user:change_me@host.docker.internal:5432/vrp_planner}
+      MASTER_DATA_API_BASE_URL: ${MASTER_DATA_API_BASE_URL:-http://host.docker.internal:8000}
+      TRUCK_MASTER_DATA_API_BASE_URL: ${TRUCK_MASTER_DATA_API_BASE_URL:-http://host.docker.internal:8002}
+      USE_MOCK_MASTER_DATA: ${USE_MOCK_MASTER_DATA:-false}
+      SOLVER_MAX_SECONDS: 30
+      SOLVER_FIRST_STRATEGY: PATH_CHEAPEST_ARC
+      SOLVER_LOCAL_SEARCH: GUIDED_LOCAL_SEARCH
+      LOG_LEVEL: INFO
+      CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+      CORS_ORIGIN_REGEX: ${CORS_ORIGIN_REGEX:-^https?://(localhost|127\\.0\\.0\\.1|10\\.\\d+\\.\\d+\\.\\d+|172\\.(1[6-9]|2\\d|3[0-1])\\.\\d+\\.\\d+|192\\.168\\.\\d+\\.\\d+)(:\\d+)?$}
+    ports:
+      - "8080:8080"
+    command: >
+      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-}
+    depends_on:
+      - backend
+    ports:
+      - "3000:3000"
+
+volumes:
+  postgres_data:

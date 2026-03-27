@@ -1,0 +1,99 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color: #15385b;
+  background:
+    radial-gradient(circle at left top, rgba(184, 210, 17, 0.16), transparent 24%),
+    radial-gradient(circle at right top, rgba(11, 115, 191, 0.10), transparent 28%),
+    linear-gradient(180deg, #f9fbfb 0%, #f2f7fa 46%, #fbfcfd 100%);
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  font-family: theme("fontFamily.body");
+  color: #15385b;
+  background:
+    radial-gradient(circle at left top, rgba(184, 210, 17, 0.16), transparent 24%),
+    radial-gradient(circle at right top, rgba(11, 115, 191, 0.10), transparent 28%),
+    linear-gradient(180deg, #f9fbfb 0%, #f2f7fa 46%, #fbfcfd 100%);
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+::selection {
+  background: rgba(11, 115, 191, 0.18);
+}
+
+.panel {
+  @apply rounded-[28px] border border-slate-200/80 bg-white shadow-card backdrop-blur-md;
+}
+
+.panel-header {
+  @apply border-b border-slate-200/80 px-6 py-5;
+}
+
+.panel-body {
+  @apply px-6 py-6;
+}
+
+.field {
+  @apply flex flex-col gap-2.5;
+}
+
+.input {
+  @apply h-14 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-base leading-none text-slate-700 shadow-sm outline-none transition duration-150 placeholder:text-slate-400 focus:border-petrolime focus:ring-4 focus:ring-lime-100;
+}
+
+select.input,
+input[type="date"].input,
+input[type="time"].input {
+  @apply py-0;
+}
+
+select.input {
+  @apply pr-12;
+}
+
+input[type="date"].input,
+input[type="time"].input {
+  @apply pr-4;
+}
+
+.checkbox {
+  @apply h-4 w-4 rounded border-slate-300 text-petroblue focus:ring-petrolime;
+}
+
+.btn-primary {
+  @apply inline-flex items-center justify-center rounded-full border border-petrolime bg-gradient-to-r from-petrolime via-lime-400 to-petroblue px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-lime-100 transition duration-150 hover:-translate-y-0.5 hover:shadow-xl hover:shadow-lime-100;
+}
+
+.btn-secondary {
+  @apply inline-flex items-center justify-center rounded-full border border-slate-200 bg-white/90 px-5 py-3 text-sm font-semibold text-petroink shadow-sm transition duration-150 hover:-translate-y-0.5 hover:border-petrolime hover:text-petroblue hover:shadow-md;
+}
+
+.table-shell {
+  @apply overflow-x-auto rounded-[28px] border border-slate-200/80 bg-white/90 shadow-sm;
+}
+
+table {
+  @apply min-w-full border-collapse;
+}
+
+th {
+  @apply bg-slate-50/90 px-5 py-4 text-left text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-500;
+}
+
+td {
+  @apply border-t border-slate-100 px-5 py-4 align-top text-sm text-slate-700;
+}
