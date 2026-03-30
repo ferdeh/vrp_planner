@@ -1,9 +1,18 @@
 import type { OptimizationRequest, OptimizationConfig } from "../types/api";
 
 export const defaultOptimizationConfig: OptimizationConfig = {
+  minimize_unserved_orders: true,
   minimize_truck_count: true,
   minimize_distance: true,
   minimize_time: true,
+  minimize_depot_operation_time: true,
+  objective_priority: [
+    "minimize_unserved_orders",
+    "minimize_truck_count",
+    "minimize_distance",
+    "minimize_time",
+    "minimize_depot_operation_time",
+  ],
   hard_constraints: {
     capacity_limit: true,
     time_window: true,
@@ -34,9 +43,10 @@ export const defaultOptimizationConfig: OptimizationConfig = {
     overtime_penalty_per_minute: 50,
     depot_operation_window_penalty_per_minute: 50,
     capacity_violation_penalty: 0,
-    fixed_cost_vehicle: 10000,
+    activation_cost_vehicle: 10000,
     distance_weight: 1,
     time_weight: 1,
+    depot_operation_time_weight: 1,
   },
   solver_options: {
     max_solver_seconds: 30,
@@ -84,9 +94,6 @@ export const sampleOptimizationRequest: OptimizationRequest = {
       truck_type: "SMALL",
       truck_category: 2,
       capacity_kl: 8,
-      fixed_cost: 1000,
-      variable_cost_per_km: 10,
-      variable_cost_per_minute: 2,
       start_depot_id: "DPT001",
       end_depot_id: "DPT001",
       shift_start: "06:00",
@@ -103,9 +110,6 @@ export const sampleOptimizationRequest: OptimizationRequest = {
       truck_type: "MEDIUM",
       truck_category: 3,
       capacity_kl: 16,
-      fixed_cost: 1800,
-      variable_cost_per_km: 12,
-      variable_cost_per_minute: 2,
       start_depot_id: "DPT001",
       end_depot_id: "DPT001",
       shift_start: "06:00",

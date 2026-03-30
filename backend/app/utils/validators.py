@@ -30,8 +30,6 @@ def validate_truck(truck: schemas.TruckInput, scenario_depot_id: str) -> None:
         raise ValueError(f"Truck {truck.truck_id} must define at least one compartment.")
     if any(compartment.capacity_kl <= 0 for compartment in truck.compartments):
         raise ValueError(f"Truck {truck.truck_id} has a compartment with invalid capacity.")
-    if truck.fixed_cost < 0 or truck.variable_cost_per_km < 0 or truck.variable_cost_per_minute < 0:
-        raise ValueError(f"Truck {truck.truck_id} cannot have negative costs.")
     if truck.start_depot_id != scenario_depot_id or truck.end_depot_id != scenario_depot_id:
         raise ValueError(
             f"Truck {truck.truck_id} must start and end at scenario depot {scenario_depot_id} for MVP."

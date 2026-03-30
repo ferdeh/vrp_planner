@@ -7,26 +7,34 @@ export function RouteCard({ route }: { route: RouteDetailResponse }) {
   const tripSummaries = Array.from({ length: route.trip_count }, (_, index) => {
     const tripSequence = index + 1;
     const tripStops = route.stops.filter((stop) => stop.trip_sequence === tripSequence);
-    const reloadStop = tripStops.find((stop) => stop.stop_kind === "depot_reload");
+    const depotStop = tripStops.find(
+      (stop) => stop.stop_kind === "depot_reload" || stop.stop_kind === "depot_wait",
+    );
     const deliveryStops = tripStops.filter((stop) => stop.stop_kind === "delivery");
     const tripLoad = deliveryStops.reduce((sum, stop) => sum + stop.delivered_volume, 0);
     const firstDelivery = deliveryStops[0];
     const lastDelivery = deliveryStops[deliveryStops.length - 1];
+    const startContext =
+      tripSequence === 1
+        ? "Depot Service"
+        : depotStop?.stop_kind === "depot_wait"
+          ? "Depot Wait"
+          : "Depot Reload";
 
     return {
       tripSequence,
       startLabel:
         tripSequence === 1
           ? `${route.origin_service_start || "-"} -> ${route.origin_etd || "-"}`
-          : `${reloadStop?.eta || "-"} -> ${reloadStop?.etd || "-"}`,
-      startContext: tripSequence === 1 ? "Depot Service" : "Depot Reload",
+          : `${depotStop?.eta || "-"} -> ${depotStop?.etd || "-"}`,
+      startContext,
       firstDestination: firstDelivery?.spbu_name || firstDelivery?.spbu_id || "-",
       deliveryCount: deliveryStops.length,
       tripLoad,
       finishLabel:
         tripSequence === route.trip_count
           ? `${lastDelivery?.etd || "-"} -> ${route.return_eta || "-"}`
-          : lastDelivery?.etd || reloadStop?.etd || "-",
+          : lastDelivery?.etd || depotStop?.etd || "-",
       finishContext: tripSequence === route.trip_count ? "Last Delivery / Return Depot" : "Last Delivery",
     };
   });

@@ -25,9 +25,6 @@ MOCK_TRUCKS = [
         "compartments": [
             {"compartment_id": "C1", "capacity_kl": 8},
         ],
-        "fixed_cost": 1000,
-        "variable_cost_per_km": 10,
-        "variable_cost_per_minute": 2,
         "depot_id": "65",
         "shift_start": "06:00",
         "shift_end": "18:00",
@@ -43,9 +40,6 @@ MOCK_TRUCKS = [
             {"compartment_id": "C1", "capacity_kl": 8},
             {"compartment_id": "C2", "capacity_kl": 8},
         ],
-        "fixed_cost": 1800,
-        "variable_cost_per_km": 12,
-        "variable_cost_per_minute": 2,
         "depot_id": "65",
         "shift_start": "06:00",
         "shift_end": "18:00",
@@ -154,13 +148,6 @@ class TruckMasterDataClient:
                 total_capacity
                 if total_capacity is not None
                 else self._pick_first(item, ["capacity_kl", "capacity", "capacity_kl_total"], default=8)
-            ),
-            fixed_cost=float(self._pick_first(item, ["fixed_cost", "vehicle_fixed_cost"], default=1000)),
-            variable_cost_per_km=float(
-                self._pick_first(item, ["variable_cost_per_km", "cost_per_km"], default=10)
-            ),
-            variable_cost_per_minute=float(
-                self._pick_first(item, ["variable_cost_per_minute", "cost_per_minute"], default=2)
             ),
             depot_id=str(depot_id),
             shift_start=self._normalize_time(

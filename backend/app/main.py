@@ -18,6 +18,8 @@ from app.core.config import get_settings
 from app.core.database import Base, get_engine
 from app.core.logging import configure_logging
 from app.models import db_models  # noqa: F401
+from app.services.optimization_worker import optimization_worker
+from app.services.scenario_analysis_worker import scenario_analysis_worker
 
 settings = get_settings()
 configure_logging(settings)
@@ -31,6 +33,8 @@ async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=get_engine())
     logger.info("Application started in %s mode", settings.app_env)
     yield
+    optimization_worker.shutdown()
+    scenario_analysis_worker.shutdown()
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)

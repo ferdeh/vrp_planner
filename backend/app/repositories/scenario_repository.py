@@ -6,7 +6,7 @@ from statistics import mean
 from uuid import UUID
 
 from sqlalchemy import desc, select
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.models import db_models, schemas
 
@@ -21,15 +21,45 @@ class ScenarioRepository:
         scenario = db_models.Scenario(
             dispatch_date=payload.dispatch_date,
             depot_id=payload.depot_id,
-            status="error",
-            message="Scenario initialized.",
+            status="processing",
+            message="Optimization is in progress.",
             raw_request=payload.model_dump(mode="json"),
             orders=[
-                db_models.ScenarioOrder(**order.model_dump())
+                db_models.ScenarioOrder(**order.model_dump(exclude={"spbu_name"}))
                 for order in payload.orders
             ],
             trucks=[
-                db_models.ScenarioTruck(**truck.model_dump())
+                db_models.ScenarioTruck(
+                    truck_id=truck.truck_id,
+                    no_polisi=truck.no_polisi,
+                    truck_type=truck.truck_type,
+                    truck_category=truck.truck_category,
+                    capacity_kl=truck.capacity_kl,
+                    fixed_cost=(
+                        payload.optimization_config.penalties.activation_cost_vehicle
+                        if payload.optimization_config
+                        else schemas.OptimizationConfig().penalties.activation_cost_vehicle
+                    ),
+                    variable_cost_per_km=(
+                        payload.optimization_config.penalties.distance_weight
+                        if payload.optimization_config
+                        else schemas.OptimizationConfig().penalties.distance_weight
+                    ),
+                    variable_cost_per_minute=(
+                        payload.optimization_config.penalties.time_weight
+                        if payload.optimization_config
+                        else schemas.OptimizationConfig().penalties.time_weight
+                    ),
+                    start_depot_id=truck.start_depot_id,
+                    end_depot_id=truck.end_depot_id,
+                    shift_start=truck.shift_start,
+                    shift_end=truck.shift_end,
+                    compatible_product_types=truck.compatible_product_types,
+                    compartments=[item.model_dump() for item in truck.compartments],
+                    status=truck.status,
+                    not_available_from=truck.not_available_from,
+                    not_available_to=truck.not_available_to,
+                )
                 for truck in payload.available_trucks
             ],
             optimization_config=db_models.OptimizationConfigDB(
@@ -48,13 +78,13 @@ class ScenarioRepository:
             select(db_models.Scenario)
             .where(db_models.Scenario.id == str(scenario_id))
             .options(
-                joinedload(db_models.Scenario.orders),
-                joinedload(db_models.Scenario.trucks),
+                selectinload(db_models.Scenario.orders),
+                selectinload(db_models.Scenario.trucks),
                 joinedload(db_models.Scenario.optimization_config),
                 joinedload(db_models.Scenario.result)
-                .joinedload(db_models.OptimizationResult.routes)
-                .joinedload(db_models.OptimizationRoute.stops),
-                joinedload(db_models.Scenario.result).joinedload(db_models.OptimizationResult.unserved_orders),
+                .selectinload(db_models.OptimizationResult.routes)
+                .selectinload(db_models.OptimizationRoute.stops),
+                joinedload(db_models.Scenario.result).selectinload(db_models.OptimizationResult.unserved_orders),
             )
         )
         return self.db.execute(stmt).unique().scalar_one_or_none()

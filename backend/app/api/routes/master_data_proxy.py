@@ -8,9 +8,17 @@ from fastapi import APIRouter, HTTPException, Query
 
 from app.models import schemas
 from app.services.master_data_client import MasterDataClient
+from app.services.network_client import NetworkClient
 from app.services.truck_master_data_client import TruckMasterDataClient
 
 router = APIRouter(prefix="/api/v1/master-data", tags=["master-data"])
+
+
+def _parse_csv_ids(raw_value: str | None) -> list[str] | None:
+    if not raw_value:
+        return None
+    values = [item.strip() for item in raw_value.split(",") if item.strip()]
+    return values or None
 
 
 @router.get("/spbu", response_model=schemas.MasterDataListResponse)
@@ -32,6 +40,30 @@ def list_depots_proxy() -> schemas.MasterDataListResponse:
     client = MasterDataClient()
     try:
         items = [item.model_dump() for item in client.list_depots()]
+        return schemas.MasterDataListResponse(items=items)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get("/nodes", response_model=schemas.MasterDataListResponse)
+def list_nodes_proxy(node_ids: str | None = Query(default=None)) -> schemas.MasterDataListResponse:
+    """Return graph nodes from master data service."""
+
+    client = MasterDataClient()
+    try:
+        items = [item.model_dump() for item in client.list_network_nodes(node_ids=_parse_csv_ids(node_ids))]
+        return schemas.MasterDataListResponse(items=items)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get("/effective-edges", response_model=schemas.MasterDataListResponse)
+def list_effective_edges_proxy(node_ids: str | None = Query(default=None)) -> schemas.MasterDataListResponse:
+    """Return effective graph edges from master data service."""
+
+    client = NetworkClient()
+    try:
+        items = [item.model_dump() for item in client.list_effective_edges(node_ids=_parse_csv_ids(node_ids))]
         return schemas.MasterDataListResponse(items=items)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc

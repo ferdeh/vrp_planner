@@ -32,6 +32,15 @@ class BuiltModel:
 
 def build_routing_model(problem: PreprocessedProblem) -> BuiltModel:
     """Build routing model and all configured dimensions."""
+    return build_routing_model_with_options(problem)
+
+
+def build_routing_model_with_options(
+    problem: PreprocessedProblem,
+    *,
+    include_soft_priority_eta_objective: bool = True,
+) -> BuiltModel:
+    """Build routing model with optional objective toggles for multi-pass solving."""
 
     manager = pywrapcp.RoutingIndexManager(len(problem.route_nodes) + 1, len(problem.trucks), 0)
     routing = pywrapcp.RoutingModel(manager)
@@ -46,7 +55,12 @@ def build_routing_model(problem: PreprocessedProblem) -> BuiltModel:
             to_name = "DEPOT" if to_detail is None else to_detail.matrix_node_name
             distance = problem.distance_matrix[problem.matrix_positions[from_name]][problem.matrix_positions[to_name]]
             travel_time = problem.time_matrix[problem.matrix_positions[from_name]][problem.matrix_positions[to_name]]
-            return transit_cost(distance, travel_time, problem.trucks[vehicle_id], problem.config)
+            return transit_cost(
+                distance,
+                travel_time,
+                problem.trucks[vehicle_id],
+                problem.config,
+            )
 
         callback_index = routing.RegisterTransitCallback(vehicle_cost)
         routing.SetArcCostEvaluatorOfVehicle(callback_index, vehicle_id)
@@ -54,7 +68,12 @@ def build_routing_model(problem: PreprocessedProblem) -> BuiltModel:
 
     capacity_dimension = apply_capacity_constraints(routing, manager, problem)
     distance_dimension = apply_distance_constraints(routing, manager, problem)
-    time_artifacts: TimeConstraintArtifacts = apply_time_constraints(routing, manager, problem)
+    time_artifacts: TimeConstraintArtifacts = apply_time_constraints(
+        routing,
+        manager,
+        problem,
+        include_soft_priority_eta_objective=include_soft_priority_eta_objective,
+    )
     time_dimension = time_artifacts.dimension
     apply_vehicle_compatibility(routing, manager, problem)
     apply_optional_visits(routing, manager, problem)

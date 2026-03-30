@@ -24,6 +24,11 @@ class NetworkClient:
     def __init__(self, master_data_client: MasterDataClient | None = None) -> None:
         self.settings = get_settings()
         self.master_data_client = master_data_client or MasterDataClient()
+        self._graph_coordinates_cache: dict[str, tuple[float, float]] | None = None
+        self._effective_edges_cache: list[dict] | None = None
+        self._graph_cache: dict[str, list[tuple[str, float, float]]] | None = None
+        self._detailed_graph_cache: dict[str, list[dict[str, str | float]]] | None = None
+        self._leg_audit_cache: dict[tuple[str, str], dict[str, str | float | None]] = {}
 
     def get_time_matrix(self, depot_id: str, spbu_ids: list[str]) -> schemas.MatrixResponse:
         if self.settings.use_mock_master_data:
@@ -81,10 +86,38 @@ class NetworkClient:
                 "travel_time_minutes": round(minutes, 2),
             }
 
+        cache_key = (origin_id, destination_id)
+        if cache_key in self._leg_audit_cache:
+            return dict(self._leg_audit_cache[cache_key])
+
         coordinates = self._get_graph_coordinates()
-        edges = self._get(self.settings.api_paths["effective_edges"], params={})
-        graph = self._build_detailed_graph(edges)
-        return self._shortest_path_audit(origin_id, destination_id, graph, coordinates)
+        graph = self._get_detailed_graph()
+        audit = self._shortest_path_audit(origin_id, destination_id, graph, coordinates)
+        self._leg_audit_cache[cache_key] = audit
+        return dict(audit)
+
+    def list_effective_edges(self, node_ids: list[str] | None = None) -> list[schemas.EffectiveEdgeData]:
+        if self.settings.use_mock_master_data:
+            return self._build_mock_effective_edges(node_ids=node_ids)
+
+        allowed = set(node_ids) if node_ids else None
+        items: list[schemas.EffectiveEdgeData] = []
+        for edge in self._get(self.settings.api_paths["effective_edges"], params={}):
+            from_node_id = str(edge["from_node_id"])
+            to_node_id = str(edge["to_node_id"])
+            if allowed is not None and (from_node_id not in allowed or to_node_id not in allowed):
+                continue
+            items.append(
+                schemas.EffectiveEdgeData(
+                    from_node_id=from_node_id,
+                    to_node_id=to_node_id,
+                    distance_km=float(edge["distance_km"]) if edge.get("distance_km") not in (None, "") else None,
+                    max_velocity_kmh=self._read_effective_edge_speed(edge),
+                    source=str(edge["source"]) if edge.get("source") else None,
+                    road_category=str(edge["road_category"]) if edge.get("road_category") else None,
+                )
+            )
+        return items
 
     def _get(self, path: str, params: dict[str, str]):
         url = f"{self.settings.master_data_api_base_url.rstrip('/')}{path}"
@@ -102,8 +135,7 @@ class NetworkClient:
     ) -> schemas.MatrixResponse:
         requested_nodes = [depot_id, *spbu_ids]
         coordinates = self._get_graph_coordinates()
-        edges = self._get(self.settings.api_paths["effective_edges"], params={})
-        graph = self._build_graph(edges)
+        graph = self._get_graph()
         matrix: list[list[int]] = []
         for origin in requested_nodes:
             distances = self._shortest_paths(origin, graph, mode)
@@ -120,12 +152,30 @@ class NetworkClient:
         return schemas.MatrixResponse(nodes=["DEPOT", *spbu_ids], matrix=matrix)
 
     def _get_graph_coordinates(self) -> dict[str, tuple[float, float]]:
+        if self._graph_coordinates_cache is not None:
+            return self._graph_coordinates_cache
         coordinates: dict[str, tuple[float, float]] = {}
         for depot in self.master_data_client.list_depots():
             coordinates[depot.depot_id] = (depot.lat, depot.lng)
         for spbu in self.master_data_client.list_spbu():
             coordinates[spbu.spbu_id] = (spbu.lat, spbu.lng)
+        self._graph_coordinates_cache = coordinates
         return coordinates
+
+    def _get_effective_edges(self) -> list[dict]:
+        if self._effective_edges_cache is None:
+            self._effective_edges_cache = self._get(self.settings.api_paths["effective_edges"], params={})
+        return self._effective_edges_cache
+
+    def _get_graph(self) -> dict[str, list[tuple[str, float, float]]]:
+        if self._graph_cache is None:
+            self._graph_cache = self._build_graph(self._get_effective_edges())
+        return self._graph_cache
+
+    def _get_detailed_graph(self) -> dict[str, list[dict[str, str | float]]]:
+        if self._detailed_graph_cache is None:
+            self._detailed_graph_cache = self._build_detailed_graph(self._get_effective_edges())
+        return self._detailed_graph_cache
 
     def _build_graph(self, edges: list[dict]) -> dict[str, list[tuple[str, float, float]]]:
         graph: dict[str, list[tuple[str, float, float]]] = {}
@@ -180,6 +230,21 @@ class NetworkClient:
         except (TypeError, ValueError):
             speed = self.DEFAULT_EDGE_SPEED_KMH
         return speed if speed > 0 else self.DEFAULT_EDGE_SPEED_KMH
+
+    def _read_effective_edge_speed(self, edge: dict) -> float | None:
+        raw_speed = (
+            edge.get("max_velocity_kmh")
+            or edge.get("max_speed_kmh")
+            or edge.get("max_speed")
+            or edge.get("speed_kmh")
+        )
+        if raw_speed in (None, ""):
+            return None
+        try:
+            speed = float(raw_speed)
+        except (TypeError, ValueError):
+            return None
+        return speed if speed > 0 else None
 
     def _shortest_paths(
         self,
@@ -311,3 +376,23 @@ class NetworkClient:
                     row.append(int(round(km * minutes_per_km)))
             matrix.append(row)
         return schemas.MatrixResponse(nodes=nodes, matrix=matrix)
+
+    def _build_mock_effective_edges(self, node_ids: list[str] | None = None) -> list[schemas.EffectiveEdgeData]:
+        nodes = self.master_data_client.list_network_nodes(node_ids=node_ids)
+        items: list[schemas.EffectiveEdgeData] = []
+        for index, origin in enumerate(nodes):
+            for destination in nodes[index + 1 :]:
+                items.append(
+                    schemas.EffectiveEdgeData(
+                        from_node_id=origin.node_id,
+                        to_node_id=destination.node_id,
+                        distance_km=round(
+                            haversine_distance_km(origin.lat, origin.lng, destination.lat, destination.lng),
+                            2,
+                        ),
+                        max_velocity_kmh=self.DEFAULT_EDGE_SPEED_KMH,
+                        source="MOCK",
+                        road_category="DIRECT",
+                    )
+                )
+        return items

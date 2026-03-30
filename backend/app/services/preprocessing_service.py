@@ -84,6 +84,39 @@ class PreprocessingService:
         self.master_data_client = master_data_client or MasterDataClient()
         self.network_client = network_client or NetworkClient(self.master_data_client)
 
+    def _estimate_reload_node_count(
+        self,
+        shipments: list[RouteNode],
+        available_trucks: list[schemas.TruckInput],
+    ) -> int:
+        """Estimate a realistic upper bound for depot reload opportunities."""
+
+        if not shipments or not available_trucks:
+            return 0
+
+        total_shipment_demand = sum(node.demand_kl for node in shipments)
+        total_initial_capacity = sum(truck.capacity_kl for truck in available_trucks)
+        extra_capacity_needed = max(0.0, round(total_shipment_demand - total_initial_capacity, 6))
+
+        smallest_reload_capacity = min(
+            (truck.capacity_kl for truck in available_trucks if truck.capacity_kl > 0),
+            default=0.0,
+        )
+        capacity_based_reloads = 0
+        if extra_capacity_needed > 0:
+            if smallest_reload_capacity <= 0:
+                capacity_based_reloads = max(0, len(shipments) - 1)
+            else:
+                capacity_based_reloads = int(math.ceil(extra_capacity_needed / smallest_reload_capacity))
+
+        total_initial_compartment_slots = sum(max(1, len(truck.compartments)) for truck in available_trucks)
+        slot_based_reloads = max(0, len(shipments) - total_initial_compartment_slots)
+
+        theoretical_reload_count = max(capacity_based_reloads, slot_based_reloads)
+        if theoretical_reload_count <= 0:
+            return 0
+        return max(1, min(len(shipments) - 1, theoretical_reload_count))
+
     def preprocess(
         self,
         payload: schemas.OptimizationRequest,
@@ -298,8 +331,9 @@ class PreprocessingService:
             )
 
         route_nodes = list(shipments)
-        if shipments:
-            for reload_number in range(1, len(shipments)):
+        reload_node_count = self._estimate_reload_node_count(shipments, available_trucks)
+        if reload_node_count > 0:
+            for reload_number in range(1, reload_node_count + 1):
                 route_nodes.append(
                     RouteNode(
                         node_index=len(route_nodes) + 1,

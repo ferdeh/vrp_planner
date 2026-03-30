@@ -4,7 +4,7 @@ import type { RouteDetailResponse } from "../../types/api";
 
 type TimelineLeg = {
   key: string;
-  kind: "origin_service" | "delivery" | "depot_reload" | "return";
+  kind: "origin_service" | "delivery" | "depot_reload" | "depot_wait" | "return";
   originName: string;
   originEtd: string;
   destinationName: string;
@@ -23,6 +23,10 @@ type TimelineRoute = {
   startLabel: string;
   finishLabel: string;
   legs: TimelineLeg[];
+};
+
+type TimelineLegWithLane = TimelineLeg & {
+  labelLane: number;
 };
 
 function hhmmToMinutes(value: string | null | undefined) {
@@ -75,8 +79,9 @@ function buildTimelineLegs(route: RouteDetailResponse): TimelineLeg[] {
 
   route.stops.forEach((stop, index) => {
     const previousStop = index > 0 ? route.stops[index - 1] : null;
-    const startMinutes = hhmmToMinutes(previousStop?.etd || route.origin_etd);
-    const etaMinutes = hhmmToMinutes(stop.eta);
+    const isDepotWait = stop.stop_kind === "depot_wait";
+    const startMinutes = hhmmToMinutes(isDepotWait ? stop.eta : previousStop?.etd || route.origin_etd);
+    const etaMinutes = hhmmToMinutes(isDepotWait ? stop.etd : stop.eta);
     const etdMinutes = hhmmToMinutes(stop.etd);
 
     if (startMinutes === null || etaMinutes === null) {
@@ -85,14 +90,19 @@ function buildTimelineLegs(route: RouteDetailResponse): TimelineLeg[] {
 
     legs.push({
       key: `${route.truck_id}-${stop.order_id}-${stop.sequence}`,
-      kind: stop.stop_kind === "depot_reload" ? "depot_reload" : "delivery",
-      originName: previousStop?.spbu_name || route.origin_name || "-",
-      originEtd: previousStop?.etd || route.origin_etd || "-",
+      kind:
+        stop.stop_kind === "depot_reload"
+          ? "depot_reload"
+          : stop.stop_kind === "depot_wait"
+            ? "depot_wait"
+            : "delivery",
+      originName: isDepotWait ? stop.spbu_name || route.origin_name || "-" : previousStop?.spbu_name || route.origin_name || "-",
+      originEtd: isDepotWait ? stop.eta : previousStop?.etd || route.origin_etd || "-",
       destinationName: stop.spbu_name || "-",
-      destinationEta: stop.eta,
+      destinationEta: isDepotWait ? stop.etd : stop.eta,
       destinationEtd: stop.etd,
-      distanceKm: stop.travel_distance_km ?? null,
-      driveMinutes: stop.travel_time_minutes ?? null,
+      distanceKm: isDepotWait ? null : stop.travel_distance_km ?? null,
+      driveMinutes: isDepotWait ? null : stop.travel_time_minutes ?? null,
       startMinutes,
       etaMinutes,
       etdMinutes,
@@ -135,6 +145,25 @@ function buildTimelineRoutes(routes: RouteDetailResponse[]): TimelineRoute[] {
       legs: buildTimelineLegs(route),
     }))
     .filter((item) => item.legs.length > 0);
+}
+
+function assignMilestoneLanes(legs: TimelineLeg[]): TimelineLegWithLane[] {
+  const laneLastEtaMinutes: number[] = [];
+
+  return legs.map((leg) => {
+    let lane = 0;
+    while (
+      laneLastEtaMinutes[lane] !== undefined &&
+      Math.abs(leg.etaMinutes - laneLastEtaMinutes[lane]) < 35
+    ) {
+      lane += 1;
+    }
+    laneLastEtaMinutes[lane] = leg.etaMinutes;
+    return {
+      ...leg,
+      labelLane: lane,
+    };
+  });
 }
 
 export function RouteIllustration({ routes }: { routes: RouteDetailResponse[] }) {
@@ -230,19 +259,24 @@ export function RouteIllustration({ routes }: { routes: RouteDetailResponse[] })
                   <div className="relative h-[156px]">
                     <div className="absolute left-1 right-1 top-[46px] h-px bg-slate-200" />
 
-                    {item.legs.map((leg) => {
+                    {assignMilestoneLanes(item.legs).map((leg) => {
                       const travelStart = positionPercent(leg.startMinutes);
                       const travelEnd = positionPercent(leg.etaMinutes);
                       const serviceEnd =
-                        leg.kind === "delivery" && leg.etdMinutes !== null
+                        (leg.kind === "delivery" || leg.kind === "depot_reload" || leg.kind === "depot_wait") &&
+                        leg.etdMinutes !== null
                           ? positionPercent(leg.etdMinutes)
                           : travelEnd;
+                      const legDurationMinutes =
+                        (leg.etdMinutes ?? leg.etaMinutes) - leg.startMinutes;
                       const travelWidth = Math.max(travelEnd - travelStart, 1.6);
                       const serviceWidth =
-                        leg.kind === "delivery" && leg.etdMinutes !== null
+                        (leg.kind === "delivery" || leg.kind === "depot_reload" || leg.kind === "depot_wait") &&
+                        leg.etdMinutes !== null
                           ? Math.max(serviceEnd - travelEnd, 1.2)
                           : 0;
                       const milestoneLeft = travelEnd;
+                      const labelTop = leg.labelLane * 20;
 
                       const isActive = activeLegKey === leg.key;
                       const tooltipLeft = `clamp(16px, calc(${milestoneLeft}% - 120px), calc(100% - 256px))`;
@@ -250,14 +284,14 @@ export function RouteIllustration({ routes }: { routes: RouteDetailResponse[] })
                       return (
                         <div key={leg.key}>
                           <div
-                            className={`absolute top-[30px] h-8 rounded-full px-3 py-1 text-xs font-semibold text-white shadow-sm ${
+                            className={`absolute top-[30px] h-8 rounded-[14px] px-3 py-1 text-xs font-semibold text-white shadow-sm ${
                               leg.kind === "return"
                                 ? "bg-gradient-to-r from-slate-500 to-slate-700"
                                 : leg.kind === "origin_service"
                                   ? "border border-orange-300 bg-orange-200 text-orange-950"
-                                  : leg.kind === "depot_reload"
+                                  : leg.kind === "depot_reload" || leg.kind === "depot_wait"
                                     ? "border border-orange-300 bg-orange-200 text-orange-950"
-                                  : "bg-gradient-to-r from-sky-600 to-cyan-500"
+                                    : "bg-gradient-to-r from-sky-600 to-cyan-500"
                             }`}
                             style={{
                               left: `calc(${travelStart}% + 4px)`,
@@ -272,12 +306,18 @@ export function RouteIllustration({ routes }: { routes: RouteDetailResponse[] })
                                   : leg.kind === "origin_service"
                                     ? "Depot Service"
                                     : leg.kind === "depot_reload"
-                                      ? "Depot Reload"
-                                    : leg.originName}
+                                      ? leg.originName
+                                      : leg.kind === "depot_wait"
+                                        ? "Depot Wait"
+                                      : leg.originName}
                               </span>
                               <span>
-                                {leg.kind === "origin_service" || leg.kind === "depot_reload"
-                                  ? `${formatNumber(item.route.depot_service_time_minutes)} min`
+                                {leg.kind === "origin_service" || leg.kind === "depot_wait"
+                                  ? `${formatNumber(legDurationMinutes)} min`
+                                  : leg.kind === "depot_reload"
+                                    ? leg.distanceKm !== null
+                                      ? `${formatNumber(leg.distanceKm)} km`
+                                      : "-"
                                   : leg.distanceKm !== null
                                     ? `${formatNumber(leg.distanceKm)} km`
                                     : "-"}
@@ -287,21 +327,25 @@ export function RouteIllustration({ routes }: { routes: RouteDetailResponse[] })
 
                           <div
                             className={`absolute -translate-x-1/2 text-[11px] font-semibold uppercase tracking-[0.12em] ${
-                              leg.kind === "origin_service" || leg.kind === "depot_reload" ? "text-orange-700" : "text-emerald-700"
+                              leg.kind === "origin_service" || leg.kind === "depot_reload" || leg.kind === "depot_wait"
+                                ? "text-orange-700"
+                                : "text-emerald-700"
                             }`}
-                            style={{ left: `calc(${milestoneLeft}% + 4px)`, top: 0 }}
+                            style={{ left: `calc(${milestoneLeft}% + 4px)`, top: labelTop }}
                           >
                             {leg.kind === "origin_service"
                               ? `Gate Out ${leg.destinationEta}`
                               : leg.kind === "depot_reload"
                                 ? `Reload ${leg.destinationEta}`
+                                : leg.kind === "depot_wait"
+                                  ? `Wait ${leg.destinationEta}`
                                 : `ETA ${leg.destinationEta}`}
                           </div>
 
-                          {serviceWidth > 0 ? (
+                              {serviceWidth > 0 ? (
                             <div
-                              className={`absolute top-[30px] h-8 rounded-full px-3 py-1 text-xs font-semibold ${
-                                leg.kind === "depot_reload"
+                              className={`absolute top-[30px] h-8 rounded-[14px] px-3 py-1 text-xs font-semibold ${
+                                leg.kind === "depot_reload" || leg.kind === "depot_wait"
                                   ? "border border-orange-300 bg-orange-200/90 text-orange-900"
                                   : "border border-amber-300 bg-amber-200/90 text-amber-900"
                               }`}
@@ -311,7 +355,7 @@ export function RouteIllustration({ routes }: { routes: RouteDetailResponse[] })
                                 minWidth: 42,
                               }}
                             >
-                              {leg.kind === "depot_reload" ? "Reload" : "Service"}
+                              {leg.kind === "depot_wait" ? "Wait" : leg.kind === "depot_reload" ? "Reload" : "Service"}
                             </div>
                           ) : null}
 
@@ -338,16 +382,24 @@ export function RouteIllustration({ routes }: { routes: RouteDetailResponse[] })
                                       ? "Depot Return"
                                       : leg.kind === "origin_service"
                                         ? "Depot Service"
+                                        : leg.kind === "depot_reload"
+                                          ? "Depot Reload"
+                                        : leg.kind === "depot_wait"
+                                          ? "Depot Wait"
                                         : "Destination"}
                                   </p>
                                   <p className="mt-1 font-semibold text-ink">{leg.destinationName}</p>
                                 </div>
                                 <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${
-                                  leg.kind === "origin_service"
+                                  leg.kind === "origin_service" || leg.kind === "depot_wait" || leg.kind === "depot_reload"
                                     ? "bg-orange-100 text-orange-800"
                                     : "bg-emerald-100 text-emerald-800"
                                 }`}>
-                                  {leg.kind === "origin_service" ? `Gate Out ${leg.destinationEta}` : `ETA ${leg.destinationEta}`}
+                                  {leg.kind === "origin_service"
+                                    ? `Gate Out ${leg.destinationEta}`
+                                    : leg.kind === "depot_wait"
+                                      ? `Wait Until ${leg.destinationEta}`
+                                      : `ETA ${leg.destinationEta}`}
                                 </span>
                               </div>
 
@@ -372,11 +424,19 @@ export function RouteIllustration({ routes }: { routes: RouteDetailResponse[] })
                                 </div>
                                 <div className="rounded-2xl bg-slate-50 px-3 py-2">
                                   <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">
-                                    {leg.kind === "origin_service" ? "Service" : "Drive"}
+                                    {leg.kind === "origin_service"
+                                      ? "Service"
+                                      : leg.kind === "depot_reload" || leg.kind === "depot_wait"
+                                        ? "Travel"
+                                        : "Drive"}
                                   </p>
                                   <p className="mt-1 font-medium text-slate-700">
                                     {leg.kind === "origin_service"
                                       ? `${formatNumber(item.route.depot_service_time_minutes)} min`
+                                      : leg.kind === "depot_reload" || leg.kind === "depot_wait"
+                                        ? leg.driveMinutes !== null
+                                          ? `${formatNumber(leg.driveMinutes)} min`
+                                          : "-"
                                       : leg.driveMinutes !== null
                                         ? `${formatNumber(leg.driveMinutes)} min`
                                         : "-"}
@@ -403,7 +463,11 @@ export function RouteIllustration({ routes }: { routes: RouteDetailResponse[] })
                                       ? "Return leg"
                                       : leg.kind === "origin_service"
                                         ? "Depot loading"
-                                        : "Delivery leg"}
+                                        : leg.kind === "depot_reload"
+                                          ? "Depot reload"
+                                          : leg.kind === "depot_wait"
+                                            ? "Depot wait"
+                                            : "Delivery leg"}
                                   </p>
                                 </div>
                               </div>

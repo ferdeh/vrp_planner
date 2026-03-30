@@ -55,6 +55,18 @@ a {
   @apply h-14 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-base leading-none text-slate-700 shadow-sm outline-none transition duration-150 placeholder:text-slate-400 focus:border-petrolime focus:ring-4 focus:ring-lime-100;
 }
 
+.input-error {
+  @apply border-rose-300 bg-rose-50/80 text-rose-900 placeholder:text-rose-300 focus:border-rose-500 focus:ring-rose-100;
+}
+
+.section-error {
+  @apply border-rose-200 bg-rose-50/40;
+}
+
+.error-text {
+  @apply text-sm font-medium text-rose-600;
+}
+
 select.input,
 input[type="date"].input,
 input[type="time"].input {

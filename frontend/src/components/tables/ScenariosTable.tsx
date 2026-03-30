@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { formatCurrency, formatNumber, statusClass } from "../../lib/format";
+import { formatCurrency, formatNumber, statusClass, statusLabel } from "../../lib/format";
 import type { ScenarioListItem } from "../../types/api";
 
 export function ScenariosTable({
@@ -22,11 +22,11 @@ export function ScenariosTable({
   };
 
   const toggleOne = (scenarioId: string) => {
-    onSelectionChange(
-      selectedIds.includes(scenarioId)
-        ? selectedIds.filter((item) => item !== scenarioId)
-        : [...selectedIds, scenarioId],
-    );
+    if (selectedIds.includes(scenarioId)) {
+      onSelectionChange(selectedIds.filter((item) => item !== scenarioId));
+      return;
+    }
+    onSelectionChange([...selectedIds, scenarioId]);
   };
 
   return (
@@ -76,7 +76,7 @@ export function ScenariosTable({
                 <td>{item.depot_id}</td>
                 <td>
                   <span className={`rounded-full px-3 py-1 text-xs font-semibold ${statusClass(item.status)}`}>
-                    {item.status}
+                    {statusLabel(item.status)}
                   </span>
                 </td>
                 <td>{item.active_truck_count}</td>
@@ -84,9 +84,13 @@ export function ScenariosTable({
                 <td>{formatNumber(item.total_distance)} km</td>
                 <td>{formatNumber(item.total_time)} min</td>
                 <td>
-                  <Link className="font-semibold text-sea" to={`/scenarios/${item.scenario_id}`}>
-                    Lihat
-                  </Link>
+                  {item.status === "processing" ? (
+                    <span className="font-semibold text-sky-700">On Process</span>
+                  ) : (
+                    <Link className="font-semibold text-sea" to={`/scenarios/${item.scenario_id}`}>
+                      Lihat
+                    </Link>
+                  )}
                 </td>
               </tr>
             ))}

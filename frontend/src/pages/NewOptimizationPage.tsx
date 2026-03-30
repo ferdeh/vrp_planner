@@ -1,9 +1,9 @@
 import { z } from "zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useForm } from "react-hook-form";
+import { useForm, type FieldErrors } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useNavigate } from "react-router-dom";
-import { useState } from "react";
+import { useNavigate, useLocation } from "react-router-dom";
+import { useEffect, useRef, useState } from "react";
 import { AppLayout } from "../components/layout/AppLayout";
 import { PageHeader } from "../components/layout/PageHeader";
 import { OrderTableField } from "../components/forms/OrderTableField";
@@ -12,7 +12,63 @@ import { OptimizationConfigPanel } from "../components/forms/OptimizationConfigP
 import { useDepotOptions, useSpbuOptions } from "../hooks/useMasterData";
 import { defaultOptimizationConfig } from "../lib/sampleData";
 import { getSettings, listAvailableTrucks, optimize } from "../services/api";
-import type { DepotData, OptimizationRequest, TruckMasterData } from "../types/api";
+import type { DepotData, OptimizationRequest, SpbuData, TruckMasterData } from "../types/api";
+
+const SAMPLE_ORDER_VOLUME_KL = 8;
+
+const sampleProductTypes = [
+  "PERTALITE",
+  "PERTAMAX",
+  "PERTAMAX_TURBO",
+  "PERTAMAX_GREEN",
+  "BIO_SOLAR",
+  "DEXLITE",
+  "PERTAMINA_DEX",
+] as const;
+
+function pickRandom<T>(items: readonly T[]): T {
+  return items[Math.floor(Math.random() * items.length)];
+}
+
+function shuffleItems<T>(items: T[]): T[] {
+  const cloned = [...items];
+  for (let index = cloned.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    [cloned[index], cloned[swapIndex]] = [cloned[swapIndex], cloned[index]];
+  }
+  return cloned;
+}
+
+function hhmmToMinutes(value: string): number {
+  const [hours = "0", minutes = "0"] = value.split(":");
+  return Number(hours) * 60 + Number(minutes);
+}
+
+function minutesToHhmm(value: number): string {
+  const normalized = Math.max(0, Math.min((24 * 60) - 1, value));
+  const hours = String(Math.floor(normalized / 60)).padStart(2, "0");
+  const minutes = String(normalized % 60).padStart(2, "0");
+  return `${hours}:${minutes}`;
+}
+
+function buildEtaOptions(timeWindowStart: string, timeWindowEnd: string): string[] {
+  const startMinutes = hhmmToMinutes(timeWindowStart);
+  const endMinutes = hhmmToMinutes(timeWindowEnd);
+  if (Number.isNaN(startMinutes) || Number.isNaN(endMinutes) || endMinutes <= startMinutes) {
+    return [timeWindowStart || "08:00"];
+  }
+
+  const options: string[] = [];
+  for (let cursor = startMinutes; cursor <= endMinutes; cursor += 60) {
+    options.push(minutesToHhmm(cursor));
+  }
+
+  if (!options.includes(timeWindowStart)) {
+    options.unshift(timeWindowStart);
+  }
+
+  return options;
+}
 
 const hardConstraintLabels: Record<string, string> = {
   capacity_limit: "Capacity limit",
@@ -37,6 +93,16 @@ const softConstraintLabels: Record<string, string> = {
   max_vehicle_working_time: "Max working time",
   max_total_distance_per_vehicle: "Max distance per vehicle",
 };
+
+type InlineMessage = {
+  text: string;
+  tone: "info" | "error";
+};
+
+type RerunLocationState = {
+  rerunSourceScenarioId?: string;
+  rerunPayload?: OptimizationRequest;
+} | null;
 
 const schema = z.object({
   dispatch_date: z.string().min(1),
@@ -70,9 +136,6 @@ const schema = z.object({
       truck_type: z.string().min(1),
       truck_category: z.number().int().positive().nullable().optional(),
       capacity_kl: z.number().positive(),
-      fixed_cost: z.number().min(0),
-      variable_cost_per_km: z.number().min(0),
-      variable_cost_per_minute: z.number().min(0),
       start_depot_id: z.string().min(1),
       end_depot_id: z.string().min(1),
       shift_start: z.string().min(1),
@@ -115,9 +178,18 @@ const initialForm: OptimizationRequest = {
 
 export function NewOptimizationPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const queryClient = useQueryClient();
-  const [truckSyncMessage, setTruckSyncMessage] = useState<string | null>(null);
-  const [orderSampleMessage, setOrderSampleMessage] = useState<string | null>(null);
+  const headerSectionRef = useRef<HTMLElement | null>(null);
+  const ordersSectionRef = useRef<HTMLElement | null>(null);
+  const trucksSectionRef = useRef<HTMLElement | null>(null);
+  const appliedRerunRef = useRef<string | null>(null);
+  const [truckSyncMessage, setTruckSyncMessage] = useState<InlineMessage | null>(null);
+  const [orderSampleMessage, setOrderSampleMessage] = useState<InlineMessage | null>(null);
+  const [rerunMessage, setRerunMessage] = useState<string | null>(null);
+  const [isSampleModalOpen, setIsSampleModalOpen] = useState(false);
+  const [sampleDotInput, setSampleDotInput] = useState("");
+  const [sampleDotError, setSampleDotError] = useState<string | null>(null);
   const [previewRequest, setPreviewRequest] = useState<OptimizationRequest | null>(null);
   const settingsQuery = useQuery({
     queryKey: ["settings"],
@@ -129,25 +201,70 @@ export function NewOptimizationPage() {
     resolver: zodResolver(schema),
     defaultValues: initialForm,
   });
-  const { register, handleSubmit, control, reset, watch, formState } = form;
+  const { register, handleSubmit, control, reset, watch, formState, clearErrors, setError } = form;
+  const rerunState = location.state as RerunLocationState;
 
   const depotId = watch("depot_id");
   const spbuQuery = useSpbuOptions(depotId || undefined);
+  const spbuItems = (spbuQuery.data as SpbuData[] | undefined) ?? [];
   const selectedDepot = (depotQuery.data as DepotData[] | undefined)?.find(
     (item) => String(item.depot_id) === depotId,
   );
 
+  useEffect(() => {
+    if (depotId) {
+      clearErrors("depot_id");
+    }
+  }, [clearErrors, depotId]);
+
+  useEffect(() => {
+    const rerunPayload = rerunState?.rerunPayload;
+    const rerunSourceScenarioId = rerunState?.rerunSourceScenarioId;
+    if (!rerunPayload || !rerunSourceScenarioId) {
+      return;
+    }
+    if (appliedRerunRef.current === rerunSourceScenarioId) {
+      return;
+    }
+
+    reset({
+      ...rerunPayload,
+      orders: rerunPayload.orders.map((order) => ({
+        ...order,
+        eta: order.eta ?? "",
+      })),
+      available_trucks: rerunPayload.available_trucks.map((truck) => ({
+        ...truck,
+        no_polisi: truck.no_polisi ?? null,
+        truck_category: truck.truck_category ?? null,
+        status: truck.status ?? null,
+        not_available_from: truck.not_available_from ?? null,
+        not_available_to: truck.not_available_to ?? null,
+      })),
+    });
+    setPreviewRequest(null);
+    setTruckSyncMessage(null);
+    setOrderSampleMessage(null);
+    setRerunMessage(`Input disalin dari scenario ${rerunSourceScenarioId}. Semua field tetap bisa Anda ubah sebelum optimisasi dijalankan ulang.`);
+    appliedRerunRef.current = rerunSourceScenarioId;
+  }, [rerunState, reset]);
+
   const optimizeMutation = useMutation({
     mutationFn: optimize,
     onSuccess: async (result) => {
+      setPreviewRequest(null);
       await queryClient.invalidateQueries({ queryKey: ["scenarios"] });
-      navigate(`/scenarios/${result.scenario_id}`);
+      navigate("/", {
+        state: {
+          queuedScenarioId: result.scenario_id,
+        },
+      });
     },
   });
 
   const truckSyncMutation = useMutation({
     mutationFn: listAvailableTrucks,
-    onSuccess: (items) => {
+    onSuccess: (items, variables) => {
       const normalized = items
         .map((item: TruckMasterData) => ({
           truck_id: item.truck_id,
@@ -155,11 +272,8 @@ export function NewOptimizationPage() {
           truck_type: item.truck_type,
           truck_category: item.truck_category ?? null,
           capacity_kl: item.capacity_kl,
-          fixed_cost: item.fixed_cost,
-          variable_cost_per_km: item.variable_cost_per_km,
-          variable_cost_per_minute: item.variable_cost_per_minute,
-          start_depot_id: depotId,
-          end_depot_id: depotId,
+          start_depot_id: variables.depotId,
+          end_depot_id: variables.depotId,
           shift_start: item.shift_start,
           shift_end: item.shift_end,
           compatible_product_types: item.compatible_product_types,
@@ -171,15 +285,19 @@ export function NewOptimizationPage() {
 
       if (!normalized.length) {
         form.setValue("available_trucks", []);
-        setTruckSyncMessage("Tidak ada truck baru yang available untuk depot ini.");
+        setTruckSyncMessage({ text: "Tidak ada truck baru yang available untuk depot ini.", tone: "error" });
         return;
       }
 
       form.setValue("available_trucks", normalized);
-      setTruckSyncMessage(`${normalized.length} truck tersinkron dari master data untuk tanggal dispatch ini.`);
+      clearErrors("available_trucks");
+      setTruckSyncMessage({
+        text: `${normalized.length} truck tersinkron dari master data untuk tanggal dispatch ini.`,
+        tone: "info",
+      });
     },
     onError: () => {
-      setTruckSyncMessage("Sync truck gagal. Periksa koneksi ke master data truck.");
+      setTruckSyncMessage({ text: "Sync truck gagal. Periksa koneksi ke master data truck.", tone: "error" });
     },
   });
 
@@ -191,34 +309,67 @@ export function NewOptimizationPage() {
     });
   };
 
-  const loadSample = () => {
+  const openSampleModal = () => {
     if (!depotId) {
-      setOrderSampleMessage("Pilih depot terlebih dahulu sebelum generate sample order.");
+      setError("depot_id", {
+        type: "manual",
+        message: "Pilih depot terlebih dahulu sebelum generate sample order.",
+      });
+      setOrderSampleMessage({
+        text: "Pilih depot terlebih dahulu sebelum generate sample order.",
+        tone: "error",
+      });
       return;
     }
 
-    const spbuItems = (spbuQuery.data as Array<Record<string, unknown>> | undefined) ?? [];
     if (!spbuItems.length) {
-      setOrderSampleMessage("Belum ada data SPBU untuk depot ini. Tunggu master data selesai dimuat.");
+      setOrderSampleMessage({
+        text: "Belum ada data SPBU untuk depot ini. Tunggu master data selesai dimuat.",
+        tone: "error",
+      });
       return;
     }
 
-    const shuffled = [...spbuItems].sort(() => Math.random() - 0.5);
-    const sampledSpbu = shuffled.slice(0, Math.min(6, shuffled.length));
+    setSampleDotInput("");
+    setSampleDotError(null);
+    setOrderSampleMessage(null);
+    setIsSampleModalOpen(true);
+  };
+
+  const loadSample = () => {
+    const dotValue = Number(sampleDotInput);
+    if (!Number.isFinite(dotValue) || dotValue <= 0) {
+      setSampleDotError("DOT harus diisi dengan angka lebih dari 0 KL.");
+      return;
+    }
+
+    if (!spbuItems.length) {
+      setSampleDotError("Data SPBU untuk depot ini belum tersedia.");
+      return;
+    }
+
+    const orderCount = Math.max(1, Math.round(dotValue / SAMPLE_ORDER_VOLUME_KL));
     const dispatchDate = form.getValues("dispatch_date") || new Date().toISOString().slice(0, 10);
     const dateCode = dispatchDate.replaceAll("-", "");
-    const generatedOrders = sampledSpbu.map((item, index) => {
+    let currentPool = shuffleItems(spbuItems);
+    const pickedSpbu = Array.from({ length: orderCount }, () => {
+      if (!currentPool.length) {
+        currentPool = shuffleItems(spbuItems);
+      }
+      return currentPool.pop() as SpbuData;
+    });
+    const generatedOrders = pickedSpbu.map((item, index) => {
       const timeWindowStart = String(item.time_window_start ?? "08:00");
       const timeWindowEnd = String(item.time_window_end ?? "17:00");
-      const etaOptions = [timeWindowStart, "09:00", "10:00", "11:00", "13:00", "14:00"];
-      const demandOptions = [8, 16, 24];
+      const priority = Math.random() >= 0.5;
+      const etaOptions = buildEtaOptions(timeWindowStart, timeWindowEnd);
       return {
         order_id: `ORD-${dateCode}-${String(index + 1).padStart(3, "0")}-${Math.floor(Math.random() * 90 + 10)}`,
         spbu_id: String(item.spbu_id ?? ""),
-        product_type: "PERTALITE",
-        demand_kl: demandOptions[Math.floor(Math.random() * demandOptions.length)],
-        priority: true,
-        eta: etaOptions[Math.floor(Math.random() * etaOptions.length)],
+        product_type: pickRandom(sampleProductTypes),
+        demand_kl: SAMPLE_ORDER_VOLUME_KL,
+        priority,
+        eta: priority ? pickRandom(etaOptions) : "",
         service_time_minutes: 30,
         time_window_start: timeWindowStart,
         time_window_end: timeWindowEnd,
@@ -226,10 +377,14 @@ export function NewOptimizationPage() {
     });
 
     form.setValue("orders", generatedOrders, { shouldDirty: true });
-    setOrderSampleMessage(
-      `${generatedOrders.length} order sample dibuat secara acak dari SPBU depot terpilih.`,
-    );
+    clearErrors("orders");
+    setOrderSampleMessage({
+      text: `DOT ${dotValue} KL dibulatkan menjadi ${generatedOrders.length} order sample acak @${SAMPLE_ORDER_VOLUME_KL} KL (total ${generatedOrders.length * SAMPLE_ORDER_VOLUME_KL} KL).`,
+      tone: "info",
+    });
     setTruckSyncMessage(null);
+    setSampleDotError(null);
+    setIsSampleModalOpen(false);
   };
 
   const submitOptimization = (values: OptimizationRequest) => {
@@ -244,39 +399,110 @@ export function NewOptimizationPage() {
     });
   };
 
-  const openOptimizationPreview = handleSubmit((values) => {
-    const nextTrucks = values.available_trucks.map((truck) => ({
-      ...truck,
-      start_depot_id: truck.start_depot_id || values.depot_id,
-      end_depot_id: truck.end_depot_id || values.depot_id,
-    }));
-    setPreviewRequest({
-      ...values,
-      available_trucks: nextTrucks,
-    });
-  });
+  const scrollToTruckSection = () => {
+    trucksSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+  };
+
+  const focusValidationFeedback = (errors: FieldErrors<OptimizationRequest>) => {
+    const targetSection = errors.dispatch_date || errors.depot_id || errors.depot_service_time_minutes
+      ? headerSectionRef.current
+      : errors.orders
+        ? ordersSectionRef.current
+        : errors.available_trucks
+          ? trucksSectionRef.current
+          : null;
+
+    if (targetSection) {
+      targetSection.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const openOptimizationPreview = handleSubmit(
+    (values) => {
+      if (!values.available_trucks.length) {
+        const truckErrorMessage = "Belum ada truck tersedia. Klik Sync Truck dulu sebelum menjalankan optimisasi.";
+        setTruckSyncMessage({ text: truckErrorMessage, tone: "error" });
+        setError("available_trucks", {
+          type: "manual",
+          message: truckErrorMessage,
+        });
+        setError("root", {
+          type: "manual",
+          message: truckErrorMessage,
+        });
+        scrollToTruckSection();
+        return;
+      }
+
+      clearErrors("root");
+      const nextTrucks = values.available_trucks.map((truck) => ({
+        ...truck,
+        start_depot_id: truck.start_depot_id || values.depot_id,
+        end_depot_id: truck.end_depot_id || values.depot_id,
+      }));
+      setPreviewRequest({
+        ...values,
+        available_trucks: nextTrucks,
+      });
+    },
+    (errors) => {
+      setError("root", {
+        type: "manual",
+        message: "Summary optimisasi belum bisa dibuka. Lengkapi depot, order, dan truck yang wajib dulu.",
+      });
+      focusValidationFeedback(errors);
+    },
+  );
 
   const handleSyncTrucks = () => {
     if (!depotId) {
-      setTruckSyncMessage("Pilih depot terlebih dahulu sebelum sync truck.");
+      setError("depot_id", {
+        type: "manual",
+        message: "Pilih depot terlebih dahulu sebelum sync truck.",
+      });
+      setTruckSyncMessage({ text: "Pilih depot terlebih dahulu sebelum sync truck.", tone: "error" });
       return;
     }
     const dispatchDate = form.getValues("dispatch_date");
     if (!dispatchDate) {
-      setTruckSyncMessage("Isi dispatch date terlebih dahulu sebelum sync truck.");
+      setError("dispatch_date", {
+        type: "manual",
+        message: "Isi dispatch date terlebih dahulu sebelum sync truck.",
+      });
+      setTruckSyncMessage({ text: "Isi dispatch date terlebih dahulu sebelum sync truck.", tone: "error" });
       return;
     }
+    clearErrors(["depot_id", "dispatch_date"]);
     setTruckSyncMessage(null);
     setOrderSampleMessage(null);
     truckSyncMutation.mutate({ depotId, dispatchDate });
   };
 
   const activeObjectives = previewRequest
-      ? [
-        previewRequest.optimization_config.minimize_truck_count ? "Minimize truck count" : null,
-        previewRequest.optimization_config.minimize_distance ? "Minimize distance" : null,
-        previewRequest.optimization_config.minimize_time ? "Minimize truck time" : null,
-      ].filter(Boolean)
+      ? (previewRequest.optimization_config.objective_priority ?? [])
+          .map((key) => {
+            if (!previewRequest.optimization_config[key as keyof typeof previewRequest.optimization_config]) {
+              return null;
+            }
+            switch (key) {
+              case "minimize_unserved_orders":
+                return "Minimize unserved orders";
+              case "minimize_truck_count":
+                return "Minimize truck count";
+              case "minimize_distance":
+                return "Minimize distance";
+              case "minimize_time":
+                return "Minimize truck time";
+              case "minimize_depot_operation_time":
+                return "Minimize depot operation time";
+              default:
+                return null;
+            }
+          })
+          .filter(Boolean)
     : [];
 
   const activeHardConstraints = previewRequest
@@ -327,6 +553,25 @@ export function NewOptimizationPage() {
         }))
     : [];
 
+  const getInputClass = (hasError: boolean) => (hasError ? "input input-error" : "input");
+  const getSectionClass = (hasError: boolean) => (hasError ? "panel border-rose-300 ring-2 ring-rose-100" : "panel");
+  const headerHasError = Boolean(
+    formState.errors.dispatch_date
+    || formState.errors.depot_id
+    || formState.errors.depot_service_time_minutes,
+  );
+  const ordersHasError = Boolean(formState.errors.orders);
+  const trucksHasError = Boolean(formState.errors.available_trucks);
+  const headerErrorMessage = headerHasError
+    ? "Lengkapi Header Dispatch dulu sebelum membuka summary optimisasi."
+    : null;
+  const ordersErrorMessage = ordersHasError
+    ? "Periksa kembali data order. Masih ada field order yang belum valid."
+    : null;
+  const trucksErrorMessage = trucksHasError
+    ? "Armada belum siap dipakai. Sync truck atau lengkapi data truck yang wajib."
+    : null;
+
   return (
     <AppLayout>
       <PageHeader
@@ -339,19 +584,42 @@ export function NewOptimizationPage() {
         }
       />
 
-      <form className="space-y-6" onSubmit={(event) => event.preventDefault()}>
-        <section className="panel">
+      <form className="space-y-6" onSubmit={openOptimizationPreview}>
+        {rerunMessage ? (
+          <div className="rounded-3xl border border-sky-200 bg-sky-50 px-5 py-4 text-sm text-sky-700">
+            {rerunMessage}
+          </div>
+        ) : null}
+
+        <section ref={headerSectionRef} className={getSectionClass(headerHasError)}>
           <div className="panel-header">
             <h2 className="text-xl font-semibold text-ink">Header Dispatch</h2>
+            {headerErrorMessage ? (
+              <p className="mt-2 text-sm font-medium text-rose-600">{headerErrorMessage}</p>
+            ) : null}
           </div>
           <div className="panel-body grid gap-4 md:grid-cols-4">
             <label className="field">
               <span>Dispatch date</span>
-              <input type="date" className="input" {...register("dispatch_date")} />
+              <input
+                type="date"
+                className={getInputClass(Boolean(formState.errors.dispatch_date))}
+                {...register("dispatch_date", {
+                  onChange: () => clearErrors("dispatch_date"),
+                })}
+              />
+              {formState.errors.dispatch_date?.message ? (
+                <p className="error-text">{formState.errors.dispatch_date.message}</p>
+              ) : null}
             </label>
             <label className="field">
               <span>Depot</span>
-              <select className="input" {...register("depot_id")}>
+              <select
+                className={getInputClass(Boolean(formState.errors.depot_id))}
+                {...register("depot_id", {
+                  onChange: () => clearErrors("depot_id"),
+                })}
+              >
                 <option value="">Pilih depot</option>
                 {(depotQuery.data ?? []).map((item) => (
                   <option key={String(item.depot_id)} value={String(item.depot_id)}>
@@ -359,17 +627,26 @@ export function NewOptimizationPage() {
                   </option>
                 ))}
               </select>
+              {formState.errors.depot_id?.message ? (
+                <p className="error-text">{formState.errors.depot_id.message}</p>
+              ) : null}
             </label>
             <label className="field">
               <span>Service time per truck</span>
               <input
                 type="number"
                 min={0}
-                className="input"
+                className={getInputClass(Boolean(formState.errors.depot_service_time_minutes))}
                 placeholder="Menit service di depot"
                 disabled={!depotId}
-                {...register("depot_service_time_minutes", { valueAsNumber: true })}
+                {...register("depot_service_time_minutes", {
+                  valueAsNumber: true,
+                  onChange: () => clearErrors("depot_service_time_minutes"),
+                })}
               />
+              {formState.errors.depot_service_time_minutes?.message ? (
+                <p className="error-text">{formState.errors.depot_service_time_minutes.message}</p>
+              ) : null}
             </label>
             <div className="rounded-3xl border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-500">
               {depotQuery.isError
@@ -383,29 +660,43 @@ export function NewOptimizationPage() {
           </div>
         </section>
 
-        <section className="panel">
+        <section ref={ordersSectionRef} className={getSectionClass(ordersHasError)}>
           <div className="panel-body">
+            {ordersErrorMessage ? (
+              <div className="mb-4 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700">
+                {ordersErrorMessage}
+              </div>
+            ) : null}
             <OrderTableField
               control={control}
               register={register}
               setValue={form.setValue}
-              spbuOptions={(spbuQuery.data as Array<Record<string, unknown>>) ?? []}
+              spbuOptions={spbuItems}
               depotSelected={Boolean(depotId)}
-              onLoadSample={loadSample}
-              sampleMessage={orderSampleMessage}
+              onLoadSample={openSampleModal}
+              sampleMessage={orderSampleMessage?.text ?? null}
+              sampleMessageTone={orderSampleMessage?.tone}
+              errors={formState.errors.orders}
             />
           </div>
         </section>
 
-        <section className="panel">
+        <section ref={trucksSectionRef} className={getSectionClass(trucksHasError)}>
           <div className="panel-body">
+            {trucksErrorMessage ? (
+              <div className="mb-4 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700">
+                {trucksErrorMessage}
+              </div>
+            ) : null}
             <TruckTableField
               control={control}
               register={register}
               onSyncTrucks={handleSyncTrucks}
               syncDisabled={!depotId}
               syncLoading={truckSyncMutation.isPending}
-              syncMessage={truckSyncMessage}
+              syncMessage={truckSyncMessage?.text ?? null}
+              syncMessageTone={truckSyncMessage?.tone}
+              errorMessage={formState.errors.available_trucks?.message}
             />
           </div>
         </section>
@@ -429,11 +720,70 @@ export function NewOptimizationPage() {
           <p className="text-sm text-slate-500">
             Depot aktif: <span className="font-semibold text-ink">{depotId || "-"}</span>
           </p>
-          <button type="button" className="btn-primary" disabled={optimizeMutation.isPending} onClick={openOptimizationPreview}>
+          <button type="submit" className="btn-primary" disabled={optimizeMutation.isPending}>
             {optimizeMutation.isPending ? "Menjalankan Solver..." : "Jalankan Optimisasi"}
           </button>
         </div>
       </form>
+
+      {isSampleModalOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 px-4 py-6 backdrop-blur-sm">
+          <div className="panel w-full max-w-md">
+            <div className="panel-header">
+              <h2 className="text-xl font-semibold text-ink">Generate Sample Order</h2>
+              <p className="mt-1 text-sm text-slate-500">
+                Masukkan Daily Objective Throughput (DOT) dalam KL. Sistem akan membulatkan ke order acak @8 KL pada SPBU depot terpilih.
+              </p>
+            </div>
+            <form
+              className="panel-body space-y-4"
+              onSubmit={(event) => {
+                event.preventDefault();
+                loadSample();
+              }}
+            >
+              <label className="field">
+                <span>DOT (KL)</span>
+                <input
+                  type="number"
+                  min="0.1"
+                  step="0.1"
+                  className="input"
+                  placeholder="Contoh: 50"
+                  value={sampleDotInput}
+                  onChange={(event) => {
+                    setSampleDotInput(event.target.value);
+                    if (sampleDotError) {
+                      setSampleDotError(null);
+                    }
+                  }}
+                  autoFocus
+                />
+              </label>
+              {sampleDotError ? (
+                <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+                  {sampleDotError}
+                </div>
+              ) : null}
+              <div className="flex items-center justify-end gap-3">
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => {
+                    setIsSampleModalOpen(false);
+                    setSampleDotError(null);
+                  }}
+                >
+                  Batal
+                </button>
+                <button type="submit" className="btn-primary">
+                  Generate
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      ) : null}
 
       {previewRequest ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 px-4 py-6 backdrop-blur-sm">
@@ -502,7 +852,7 @@ export function NewOptimizationPage() {
                     </div>
                     <div className="flex items-center justify-between rounded-2xl bg-white px-4 py-3">
                       <span>Vehicle activation weight</span>
-                      <span className="font-semibold text-ink">{previewRequest.optimization_config.penalties.fixed_cost_vehicle}</span>
+                      <span className="font-semibold text-ink">{previewRequest.optimization_config.penalties.activation_cost_vehicle}</span>
                     </div>
                     <div className="flex items-center justify-between rounded-2xl bg-white px-4 py-3">
                       <span>Distance weight</span>
@@ -511,6 +861,10 @@ export function NewOptimizationPage() {
                     <div className="flex items-center justify-between rounded-2xl bg-white px-4 py-3">
                       <span>Time weight</span>
                       <span className="font-semibold text-ink">{previewRequest.optimization_config.penalties.time_weight}</span>
+                    </div>
+                    <div className="flex items-center justify-between rounded-2xl bg-white px-4 py-3">
+                      <span>Depot operation time weight</span>
+                      <span className="font-semibold text-ink">{previewRequest.optimization_config.penalties.depot_operation_time_weight}</span>
                     </div>
                   </div>
                 </div>
@@ -594,7 +948,7 @@ export function NewOptimizationPage() {
                     onClick={() => submitOptimization(previewRequest)}
                     disabled={optimizeMutation.isPending}
                   >
-                    {optimizeMutation.isPending ? "Menjalankan Solver..." : "Proceed"}
+                    {optimizeMutation.isPending ? "Mengirim ke Worker..." : "Proceed"}
                   </button>
                 </div>
               </div>

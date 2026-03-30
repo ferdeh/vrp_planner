@@ -3,7 +3,7 @@ import { Link, useLocation } from "react-router-dom";
 import { ScenarioFleetComparisonCharts } from "../components/cards/ScenarioFleetComparisonCharts";
 import { AppLayout } from "../components/layout/AppLayout";
 import { PageHeader } from "../components/layout/PageHeader";
-import { formatCurrency, formatNumber, statusClass } from "../lib/format";
+import { formatCurrency, formatNumber, statusClass, statusLabel } from "../lib/format";
 import { getScenario } from "../services/api";
 
 function useScenarioIds() {
@@ -101,7 +101,7 @@ export function ScenarioComparePage() {
                     {scenarios.map((scenario) => (
                       <td key={`${scenario.scenario_id}-status`}>
                         <span className={`rounded-full px-3 py-1 text-xs font-semibold ${statusClass(scenario.status)}`}>
-                          {scenario.status}
+                          {statusLabel(scenario.status)}
                         </span>
                       </td>
                     ))}

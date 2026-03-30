@@ -1,9 +1,17 @@
 import axios from "axios";
 import type {
+  AnalysisLevel,
   DepotData,
+  MasterEffectiveEdge,
+  MasterNetworkNode,
+  OptimizationJobResponse,
   MasterDataListResponse,
   OptimizationRequest,
-  OptimizationResultResponse,
+  ScenarioAnalysisCreateRequest,
+  ScenarioAnalysisDetailResponse,
+  ScenarioAnalysisJobResponse,
+  ScenarioAnalysisOverviewResponse,
+  ScenarioAnalysisQueryResponse,
   ScenarioDetailResponse,
   ScenarioQueryResponse,
   TruckMasterData,
@@ -42,7 +50,7 @@ export async function updateSettings(payload: SystemSettingsPayload) {
 }
 
 export async function optimize(payload: OptimizationRequest) {
-  const { data } = await api.post<OptimizationResultResponse>("/api/v1/optimize", payload);
+  const { data } = await api.post<OptimizationJobResponse>("/api/v1/optimize", payload);
   return data;
 }
 
@@ -59,7 +67,37 @@ export async function deleteScenarios(scenarioIds: string[]) {
 }
 
 export async function getScenario(scenarioId: string) {
-  const { data } = await api.get<ScenarioDetailResponse>(`/api/v1/scenarios/${scenarioId}`);
+  const { data } = await api.get<ScenarioDetailResponse>(`/api/v1/scenarios/${scenarioId}`, {
+    params: { include_route_stops: false },
+  });
+  return data;
+}
+
+export async function getScenarioRoutes(scenarioId: string) {
+  const { data } = await api.get<ScenarioDetailResponse["route_details"]>(`/api/v1/scenarios/${scenarioId}/routes`);
+  return data;
+}
+
+export async function createScenarioAnalysis(scenarioId: string, level: AnalysisLevel) {
+  const payload: ScenarioAnalysisCreateRequest = { level };
+  const { data } = await api.post<ScenarioAnalysisJobResponse>(`/api/v1/scenarios/${scenarioId}/analysis`, payload);
+  return data;
+}
+
+export async function listScenarioAnalyses(scenarioId: string) {
+  const { data } = await api.get<ScenarioAnalysisQueryResponse>(`/api/v1/scenarios/${scenarioId}/analysis`);
+  return data;
+}
+
+export async function listAllScenarioAnalyses() {
+  const { data } = await api.get<ScenarioAnalysisOverviewResponse>("/api/v1/scenarios/analysis/jobs");
+  return data;
+}
+
+export async function getScenarioAnalysis(scenarioId: string, analysisId: string) {
+  const { data } = await api.get<ScenarioAnalysisDetailResponse>(
+    `/api/v1/scenarios/${scenarioId}/analysis/${analysisId}`,
+  );
   return data;
 }
 
@@ -73,6 +111,20 @@ export async function listSpbu(depotId?: string) {
 export async function listDepots() {
   const { data } = await api.get<MasterDataListResponse>("/api/v1/master-data/depots");
   return data.items as unknown as DepotData[];
+}
+
+export async function listNetworkNodes(nodeIds?: string[]) {
+  const { data } = await api.get<MasterDataListResponse>("/api/v1/master-data/nodes", {
+    params: nodeIds?.length ? { node_ids: nodeIds.join(",") } : undefined,
+  });
+  return data.items as unknown as MasterNetworkNode[];
+}
+
+export async function listEffectiveEdges(nodeIds?: string[]) {
+  const { data } = await api.get<MasterDataListResponse>("/api/v1/master-data/effective-edges", {
+    params: nodeIds?.length ? { node_ids: nodeIds.join(",") } : undefined,
+  });
+  return data.items as unknown as MasterEffectiveEdge[];
 }
 
 export async function listAvailableTrucks(params: { depotId: string; dispatchDate: string }) {

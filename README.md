@@ -49,7 +49,7 @@ Alur utama:
 - antrean depot sudah dibatasi oleh kapasitas bay (`gate_limit`) sebagai resource loading bersama, tetapi identitas bay fisik per truck belum diekspos ke output
 - jendela operasi depot mengikuti `tw_start` dan `tw_end` node depot dari SPBU network master data, belum ada override manual TW depot per skenario
 - belum ada driver scheduling
-- belum ada visualisasi peta
+- visual route map sudah tersedia untuk membaca graph node-edge masterdata dan overlay pergerakan truck, tetapi belum memakai tile map/GIS penuh
 - split delivery dilakukan di preprocessing bila demand order melebihi kapasitas compartment feasible terbesar
 
 ## 5. Struktur project
@@ -180,12 +180,32 @@ Path yang dikonsumsi backend:
 - `GET /api/spbu`
 - `GET /api/spbu/{id}`
 - `GET /api/depots`
+- `GET /nodes`
+- `GET /edges/effective`
 - `GET /api/network/time-matrix`
 - `GET /api/network/distance-matrix`
 
 Path-path ini configurable via environment variable pada backend config.
 
-## 11. Mock mode
+## 11. Visual route map
+
+Tab `Route Map` pada detail skenario sekarang memakai graph masterdata SPBU, bukan lagi layout linear per truck.
+
+Perilaku utamanya:
+
+- base edge diambil dari masterdata network melalui `nodes` dan `effective edges`
+- overlay truck digambar sebagai garis warna yang ter-offset di samping base edge yang sama
+- legend nopol truck bisa diklik untuk fokus ke satu truck tertentu
+- legend `Base Edge Masterdata` bisa diklik untuk menyorot edge masterdata dan meredupkan overlay truck
+- zoom mendukung tombol UI maupun scroll/gesture trackpad di Mac
+- drag tetap dipakai untuk pan area graph
+
+Catatan:
+
+- route map hanya menampilkan node dan edge yang relevan dengan order, depot, dan `travel_path` hasil route
+- jika `travel_path` mengandung edge yang tidak ditemukan di `effective edges`, sistem tetap menggambar fallback edge agar jalur truck tetap terbaca
+
+## 12. Mock mode
 
 Jika service eksternal belum tersedia, aktifkan:
 
@@ -195,11 +215,15 @@ USE_MOCK_MASTER_DATA=true
 
 Mock mode menyediakan depot, SPBU, dan matriks network sintetis berbasis koordinat mock.
 
-## 12. Panduan objective, parameter, dan constraint
+## 13. Panduan objective, parameter, dan constraint
 
 Bagian ini ditujukan sebagai petunjuk user operasional saat mengisi form optimisasi.
 
 ### Objective
+
+- `Minimize unserved orders`
+  Arti: menjadikan jumlah order yang tidak terkirim sebagai prioritas tertinggi saat `Allow unserved` aktif.
+  Kapan dipakai: hampir selalu direkomendasikan untuk operasi harian, terutama bila user ingin solver terus mengusahakan pengiriman order selama waktu dan armada masih tersedia.
 
 - `Minimize truck count`
   Arti: mendorong solver memakai jumlah truck aktif sesedikit mungkin.
@@ -237,10 +261,10 @@ Bagian ini ditujukan sebagai petunjuk user operasional saat mengisi form optimis
   Volume demand dalam KL.
 
 - `orders[].priority`
-  Jika `true`, order dianggap prioritas dan ETA wajib diisi.
+  Jika `true`, order dianggap prioritas dan ETA wajib diisi. Perilaku order ini mengikuti constraint `SPBU Priority`: bila hard maka wajib dilayani tepat waktu, bila soft maka wajib dilayani tetapi keterlambatan dikenai penalty.
 
 - `orders[].eta`
-  Batas target kedatangan untuk order prioritas. Dipakai oleh constraint `SPBU Priority`.
+  Batas target kedatangan untuk order prioritas. Dipakai oleh constraint `SPBU Priority`. Order priority baru boleh tidak terlayani bila `SPBU Priority` tidak aktif sebagai hard maupun soft, dan `Allow unserved` aktif.
 
 - `orders[].service_time_minutes`
   Durasi bongkar atau service di SPBU untuk order tersebut.
@@ -263,15 +287,6 @@ Bagian ini ditujukan sebagai petunjuk user operasional saat mengisi form optimis
 - `available_trucks[].shift_start` dan `available_trucks[].shift_end`
   Jam kerja truck.
 
-- `available_trucks[].fixed_cost`
-  Biaya tetap penggunaan truck.
-
-- `available_trucks[].variable_cost_per_km`
-  Biaya variabel per km.
-
-- `available_trucks[].variable_cost_per_minute`
-  Biaya variabel per menit perjalanan.
-
 ### Parameter batas operasional
 
 - `max_route_duration_minutes`
@@ -286,7 +301,7 @@ Bagian ini ditujukan sebagai petunjuk user operasional saat mengisi form optimis
 ### Parameter penalty dan solver
 
 - `unserved_order_penalty`
-  Penalti untuk setiap shipment yang tidak terlayani saat `Allow unserved` aktif.
+  Penalti untuk setiap shipment yang tidak terlayani saat `Allow unserved` aktif. Order priority hanya boleh memakai rule ini bila `SPBU Priority` tidak aktif sebagai hard maupun soft.
 
 - `late_arrival_penalty_per_minute`
   Penalti per menit keterlambatan terhadap `TW End` SPBU master data saat `Time window SPBU` dipakai sebagai soft constraint.
@@ -303,14 +318,14 @@ Bagian ini ditujukan sebagai petunjuk user operasional saat mengisi form optimis
 - `capacity_violation_penalty`
   Saat ini hanya disimpan untuk roadmap. Solver MVP masih memperlakukan kapasitas sebagai hard constraint.
 
-- `fixed_cost_vehicle`
-  Bobot tambahan fixed cost kendaraan saat `Minimize truck count` aktif.
+- `activation_cost_vehicle`
+  Biaya aktivasi kendaraan. Dipakai sekaligus pada objective solver dan perhitungan `total_cost` hasil.
 
 - `distance_weight`
-  Bobot objective jarak saat `Minimize distance` aktif.
+  Biaya per km. Dipakai sekaligus pada objective solver dan perhitungan `total_cost` hasil.
 
 - `time_weight`
-  Bobot objective waktu saat `Minimize truck time` aktif.
+  Biaya per menit perjalanan. Dipakai sekaligus pada objective solver dan perhitungan `total_cost` hasil.
 
 - `solver_options.max_solver_seconds`
   Batas waktu pencarian solver.
@@ -321,6 +336,26 @@ Bagian ini ditujukan sebagai petunjuk user operasional saat mengisi form optimis
 - `solver_options.local_search_metaheuristic`
   Strategi perbaikan solusi setelah solusi awal ditemukan.
 
+### Cara solver memprioritaskan objective
+
+Objective pada form bisa diurutkan dengan drag and drop. Urutan paling atas diprioritaskan lebih dulu. Namun agar perilaku solver lebih real secara operasional, backend sekarang tidak langsung mencampur semua objective dalam satu pass.
+
+Urutan solve yang dipakai:
+
+- Tahap 1, `service level`
+  Solver mencari solusi dengan jumlah `unserved` seminimal mungkin terlebih dahulu.
+
+- Tahap 2, `quality repair`
+  Jika masih ada order tersisa, solver menjalankan repair pass untuk mencoba memasukkan order unserved ke route yang masih punya ruang waktu kerja.
+
+- Tahap 3, `lateness/overtime refinement`
+  Setelah service level terbaik ditemukan, solver memperbaiki soft lateness, ETA priority, dan overtime.
+
+- Tahap 4, `cost/time refinement`
+  Baru setelah itu solver mengoptimalkan objective penuh seperti truck count, distance, time, dan depot operation time sesuai urutan prioritas user.
+
+Artinya, objective seperti `Minimize truck count` atau `Minimize depot operation time` tidak boleh lagi mengalahkan target dasar untuk tetap mengirim order bila masih ada peluang operasional.
+
 ### Hard constraint
 
 - `Capacity limit`
@@ -330,7 +365,7 @@ Bagian ini ditujukan sebagai petunjuk user operasional saat mengisi form optimis
   Waktu kedatangan ke SPBU wajib berada di dalam `TW Start/TW End` node SPBU dari master data.
 
 - `SPBU Priority`
-  Untuk order dengan `priority = true`, ETA wajib dipenuhi sebagai batas kedatangan keras.
+  Untuk order dengan `priority = true`, shipment wajib dilayani dan ETA wajib dipenuhi sebagai batas kedatangan keras.
 
 - `Truck category`
   Truck hanya boleh masuk SPBU bila `truck.truck_category <= spbu.truck_category`.
@@ -353,13 +388,24 @@ Bagian ini ditujukan sebagai petunjuk user operasional saat mengisi form optimis
 ### Soft constraint
 
 - `Allow unserved`
-  Solver boleh meninggalkan shipment tidak terlayani dengan penalti.
+  Solver boleh meninggalkan shipment tidak terlayani dengan penalti. Order priority hanya boleh tidak terlayani bila `SPBU Priority` tidak aktif sebagai hard maupun soft.
+
+  Catatan perilaku solver:
+  jika opsi ini aktif, solver tetap lebih dulu mengejar jumlah unserved minimum sebelum masuk ke objective biaya dan efisiensi lain.
 
 - `Time window SPBU`
   Solver boleh datang lewat `TW End` node SPBU, tetapi setiap menit keterlambatan dikenai `late_arrival_penalty_per_minute`. Tidak ada input nilai tambahan karena jendela waktunya langsung mengikuti master data SPBU.
 
 - `SPBU Priority`
-  Solver boleh melewati ETA order prioritas, tetapi setiap menit keterlambatan dikenai `priority_eta_penalty_per_minute`.
+  Order priority tetap wajib dilayani, tetapi solver boleh melewati ETA dan setiap menit keterlambatan dikenai `priority_eta_penalty_per_minute`.
+
+### Interaksi SPBU Priority dan Allow unserved
+
+- Jika `SPBU Priority` dipilih sebagai hard constraint, order priority wajib dikirim dan wajib tiba tidak lewat ETA.
+
+- Jika `SPBU Priority` dipilih sebagai soft constraint, order priority tetap wajib dikirim, tetapi boleh terlambat dengan penalty per menit.
+
+- Jika `SPBU Priority` tidak aktif sebagai hard maupun soft, lalu `Allow unserved` aktif, barulah order priority boleh tidak terlayani.
 
 - `Depot operation window`
   Operasi depot boleh melewati jendela waktu depot master data, tetapi ada penalti per menit.
@@ -376,7 +422,84 @@ Bagian ini ditujukan sebagai petunjuk user operasional saat mengisi form optimis
 - `Capacity limit`
   Opsi soft capacity saat ini masih roadmap. Solver MVP tetap memperlakukan kapasitas sebagai hard constraint walaupun penalty field tersedia.
 
-## 13. OR-Tools approach
+## 14. Scenario Analysis
+
+`Scenario Analysis` adalah fitur diagnosis skenario yang terpisah dari solver utama. Tujuannya adalah membantu user memahami akar masalah skenario, terutama saat hasil `partial`, `timeout`, atau `infeasible`.
+
+Arsitektur analysis:
+
+- optimisasi utama tetap berjalan di worker optimisasi
+- diagnosis berjalan di worker analysis terpisah
+- setiap analysis disimpan sebagai job sendiri dan bisa dibuka kembali dari aplikasi
+
+### Level 1, cepat
+
+Level 1 tidak menjalankan solver ulang. Analysis dibuat langsung dari hasil skenario yang sudah ada, sehingga responsnya ringan dan cepat.
+
+Yang dianalisis pada level ini:
+
+- status hasil solver existing
+- order unserved existing
+- cluster order priority per SPBU
+- travel time direct dari depot ke SPBU
+- ranking order yang paling problematik secara heuristik
+
+Output utama Level 1:
+
+- `Root Cause Summary`
+- `Solver Status Explained`
+- `Key Findings`
+- `Recommended Actions`
+- `Ranking Order Paling Problematik`
+
+Kapan dipakai:
+
+- saat user butuh penjelasan cepat
+- saat investigasi awal cukup memakai hasil skenario existing
+- saat tidak ingin membebani backend dengan rerun diagnosis
+
+### Level 2, kuat
+
+Level 2 menjalankan beberapa eksperimen diagnosis pada worker terpisah. Tujuannya adalah menguji hipotesis akar masalah secara lebih akurat daripada heuristik.
+
+Eksperimen diagnosis yang dijalankan:
+
+- `extended_timeout`
+  Timeout solver diperpanjang untuk melihat apakah masalah utama hanya batas waktu.
+- `priority_only`
+  Hanya order priority yang disolve untuk melihat apakah cluster priority menjadi sumber kemacetan search.
+- `priority_eta_disabled`
+  Rule `SPBU Priority` dimatikan untuk diagnosis agar dampaknya terhadap feasibility bisa dibandingkan.
+- `allow_unserved_on`
+  `Allow unserved` diaktifkan untuk melihat apakah ada subset order kecil yang memblokir solusi penuh.
+
+Output tambahan Level 2:
+
+- hasil eksperimen diagnosis
+- inference dari hasil eksperimen menjadi insight bisnis
+- rekomendasi tindakan berdasarkan rerun
+- ranking order problematik yang menggabungkan skor heuristik dan skor eksperimen
+
+Kapan dipakai:
+
+- saat skenario `timeout` atau `infeasible`
+- saat user ingin tahu constraint mana yang paling menahan solusi
+- saat planner ingin menguji apakah bottleneck berasal dari priority, timeout, atau subset order tertentu
+
+### Cara membaca hasil Scenario Analysis
+
+- `Root Cause Summary`
+  Ringkasan akar masalah dalam bahasa bisnis.
+- `Solver Status Explained`
+  Penjelasan arti status seperti `feasible`, `partial`, `timeout`, atau `infeasible`.
+- `Key Findings`
+  Temuan paling penting dari skenario atau eksperimen.
+- `Recommended Actions`
+  Saran tindakan lanjutan, misalnya review rule priority atau menaikkan timeout.
+- `Ranking Order Paling Problematik`
+  Daftar order yang paling besar kontribusinya terhadap kesulitan skenario.
+
+## 15. OR-Tools approach
 
 Implementasi solver menggunakan:
 
@@ -394,6 +517,23 @@ Objective praktis untuk MVP:
 - arc cost menggunakan komponen jarak dan waktu sesuai bobot config
 - lateness, overtime, dan pelanggaran depot operation window dipenalti sebagai soft bound bila opsinya aktif
 
+Mulai versi sekarang, solver orchestration memakai pipeline multi-stage:
+
+- `Stage 1: service-level solve`
+  Model awal fokus mengecilkan jumlah shipment unserved.
+- `Stage 2: repair pass`
+  Jika hasil masih partial, solver menjalankan seeded repair untuk mencoba memasukkan order yang masih drop ke route yang masih feasible.
+- `Stage 3: lateness/overtime refinement`
+  Solusi terbaik dari stage sebelumnya dipakai sebagai seed untuk memperbaiki priority ETA, time window soft, dan overtime.
+- `Stage 4: full objective refinement`
+  Baru setelah itu solver menjalankan objective penuh sesuai urutan priority objective dari user.
+
+Fallback tambahan:
+
+- jika `Allow unserved = false` dan solver tidak menemukan full-feasible solution dalam batas waktu, backend otomatis menjalankan `best-effort fallback`
+- fallback ini menyalakan `Allow unserved` secara internal dengan penalty sangat besar lalu mengembalikan partial solution terbaik yang ditemukan
+- tujuannya agar user tidak hanya menerima status `timeout` kosong saat sebenarnya sistem masih bisa memberi solusi operasional terbaik
+
 Aturan antrean depot yang dipakai saat ini:
 
 - `gate_limit` depot diambil dari master data node depot dan diperlakukan sebagai jumlah truck maksimum yang bisa loading bersamaan
@@ -408,7 +548,7 @@ Aturan antrean depot yang dipakai saat ini:
 - truck boleh `gate out` lebih awal lalu menunggu keperluan time window SPBU, tetapi antrean depot hanya terjadi jika resource bay sudah penuh
 - `origin_service_start` pada hasil route adalah awal service di depot, sedangkan `origin_etd` adalah waktu truck selesai service dan mulai berangkat ke SPBU
 
-## 14. API utama
+## 16. API utama
 
 ### Health
 
@@ -435,9 +575,11 @@ Aturan antrean depot yang dipakai saat ini:
 
 - `GET /api/v1/master-data/spbu`
 - `GET /api/v1/master-data/depots`
+- `GET /api/v1/master-data/nodes`
+- `GET /api/v1/master-data/effective-edges`
 - `GET /api/v1/master-data/trucks`
 
-## 15. Contoh request optimize
+## 17. Contoh request optimize
 
 ```json
 {
@@ -480,9 +622,6 @@ Aturan antrean depot yang dipakai saat ini:
           "capacity_kl": 8
         }
       ],
-      "fixed_cost": 1000,
-      "variable_cost_per_km": 10,
-      "variable_cost_per_minute": 2,
       "start_depot_id": "DPT001",
       "end_depot_id": "DPT001",
       "shift_start": "06:00",
@@ -512,9 +651,6 @@ Aturan antrean depot yang dipakai saat ini:
           "capacity_kl": 8
         }
       ],
-      "fixed_cost": 1800,
-      "variable_cost_per_km": 12,
-      "variable_cost_per_minute": 2,
       "start_depot_id": "DPT001",
       "end_depot_id": "DPT001",
       "shift_start": "06:00",
@@ -564,7 +700,7 @@ Aturan antrean depot yang dipakai saat ini:
       "overtime_penalty_per_minute": 50,
       "depot_operation_window_penalty_per_minute": 50,
       "capacity_violation_penalty": 0,
-      "fixed_cost_vehicle": 10000,
+      "activation_cost_vehicle": 10000,
       "distance_weight": 1,
       "time_weight": 1
     },
@@ -580,7 +716,7 @@ Aturan antrean depot yang dipakai saat ini:
 }
 ```
 
-## 16. Contoh response optimize
+## 18. Contoh response optimize
 
 ```json
 {
@@ -614,7 +750,7 @@ Aturan antrean depot yang dipakai saat ini:
 
 Nilai aktual dapat berbeda tergantung network matrix, constraint, dan solver randomness.
 
-## 17. Testing
+## 19. Testing
 
 Menjalankan test backend:
 
@@ -631,7 +767,7 @@ Cakupan test yang tersedia:
 - settings update
 - optimize endpoint dan scenario detail
 
-## 18. Roadmap fase berikutnya
+## 20. Roadmap fase berikutnya
 
 - multi depot
 - multi trip
@@ -639,10 +775,10 @@ Cakupan test yang tersedia:
 - explicit product-to-compartment assignment di solver
 - richer truck category policy UI/visualization
 - driver scheduling
-- dashboard map visualization
+- GIS/tile map visualization yang lebih kaya di atas route map graph yang sudah ada
 - fleet simulation
 
-## 19. Asumsi implementasi penting
+## 21. Asumsi implementasi penting
 
 - tidak ada auth pada MVP
 - payload disimpan sebagai snapshot scenario untuk audit ringan

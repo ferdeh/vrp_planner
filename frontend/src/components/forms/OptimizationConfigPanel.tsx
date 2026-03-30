@@ -1,4 +1,49 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type DragEvent } from "react";
+
+const objectiveItems = [
+  {
+    key: "minimize_unserved_orders",
+    label: "Minimize unserved orders",
+    description: "Utamakan order terlayani sebanyak mungkin sebelum mengejar objective lain.",
+  },
+  {
+    key: "minimize_truck_count",
+    label: "Minimize truck count",
+    description: "Prioritaskan jumlah truck aktif minimum.",
+  },
+  {
+    key: "minimize_distance",
+    label: "Minimize distance",
+    description: "Gunakan biaya jarak pada objective.",
+  },
+  {
+    key: "minimize_time",
+    label: "Minimize truck time",
+    description: "Gunakan biaya waktu pada objective.",
+  },
+  {
+    key: "minimize_depot_operation_time",
+    label: "Minimize depot operation time",
+    description: "Dorong truck gate out lebih pagi dan menyelesaikan rute lebih cepat.",
+  },
+] as const;
+
+type ObjectiveKey = (typeof objectiveItems)[number]["key"];
+
+function normalizeObjectivePriority(priority: string[] | undefined): ObjectiveKey[] {
+  const normalized: ObjectiveKey[] = [];
+  for (const item of priority ?? []) {
+    if (objectiveItems.some((objective) => objective.key === item) && !normalized.includes(item as ObjectiveKey)) {
+      normalized.push(item as ObjectiveKey);
+    }
+  }
+  for (const item of objectiveItems) {
+    if (!normalized.includes(item.key)) {
+      normalized.push(item.key);
+    }
+  }
+  return normalized;
+}
 
 const hardItems = [
   { path: "capacity_limit", label: "Capacity limit", description: "Kapasitas truck wajib dipenuhi." },
@@ -143,17 +188,21 @@ export function OptimizationConfigPanel({
   watch,
   setValue,
   prefix = "optimization_config",
+  showCostControls = true,
 }: {
   register: any;
   watch: any;
   setValue: any;
   prefix?: string;
+  showCostControls?: boolean;
 }) {
   const nullableNumber = {
     setValueAs: (value: string) => (value === "" ? null : Number(value)),
   };
   const hardConstraints = watch(`${prefix}.hard_constraints`) ?? {};
   const softConstraints = watch(`${prefix}.soft_constraints`) ?? {};
+  const watchedObjectivePriority = watch(`${prefix}.objective_priority`) as string[] | undefined;
+  const objectivePriority = normalizeObjectivePriority(watchedObjectivePriority);
   const selectedFirstSolutionStrategy =
     watch(`${prefix}.solver_options.first_solution_strategy`) ?? "PATH_CHEAPEST_ARC";
   const selectedLocalSearchStrategy =
@@ -176,8 +225,15 @@ export function OptimizationConfigPanel({
   const [previewedStrategy, setPreviewedStrategy] = useState<string | null>(null);
   const [isLocalSearchMenuOpen, setIsLocalSearchMenuOpen] = useState(false);
   const [previewedLocalSearch, setPreviewedLocalSearch] = useState<string | null>(null);
+  const [draggedObjectiveKey, setDraggedObjectiveKey] = useState<ObjectiveKey | null>(null);
   const strategyMenuRef = useRef<HTMLDivElement | null>(null);
   const localSearchMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (JSON.stringify(watchedObjectivePriority ?? []) !== JSON.stringify(objectivePriority)) {
+      setValue(`${prefix}.objective_priority`, objectivePriority, { shouldDirty: false });
+    }
+  }, [objectivePriority, prefix, setValue, watchedObjectivePriority]);
 
   useEffect(() => {
     if (!availableHardItems.length) {
@@ -322,41 +378,85 @@ export function OptimizationConfigPanel({
   const selectedLocalSearchMeta =
     localSearchStrategies.find((item) => item.value === selectedLocalSearchStrategy) ??
     localSearchStrategies[0];
+  const orderedObjectiveItems = objectivePriority
+    .map((key) => objectiveItems.find((item) => item.key === key))
+    .filter((item): item is (typeof objectiveItems)[number] => Boolean(item));
+
+  const moveObjective = (sourceKey: ObjectiveKey, targetKey: ObjectiveKey) => {
+    if (sourceKey === targetKey) {
+      return;
+    }
+    const next = [...objectivePriority];
+    const sourceIndex = next.indexOf(sourceKey);
+    const targetIndex = next.indexOf(targetKey);
+    if (sourceIndex < 0 || targetIndex < 0) {
+      return;
+    }
+    next.splice(sourceIndex, 1);
+    next.splice(targetIndex, 0, sourceKey);
+    setValue(`${prefix}.objective_priority`, next, { shouldDirty: true });
+  };
+
+  const handleObjectiveDragStart = (objectiveKey: ObjectiveKey) => {
+    setDraggedObjectiveKey(objectiveKey);
+  };
+
+  const handleObjectiveDrop = (event: DragEvent<HTMLDivElement>, targetKey: ObjectiveKey) => {
+    event.preventDefault();
+    if (!draggedObjectiveKey) {
+      return;
+    }
+    moveObjective(draggedObjectiveKey, targetKey);
+    setDraggedObjectiveKey(null);
+  };
+
   return (
     <div className="space-y-8">
       <div className="space-y-4">
         <div>
           <h3 className="text-lg font-semibold text-ink">Objective</h3>
-          <p className="text-sm text-slate-500">Campuran objective praktis untuk MVP dispatch.</p>
+          <p className="text-sm text-slate-500">
+            Drag kartu objective untuk mengatur prioritas solver. Urutan paling atas akan diprioritaskan lebih dulu.
+          </p>
         </div>
-        <div className="grid gap-3 md:grid-cols-3">
-          <label className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
-            <div className="flex gap-3">
-              <input type="checkbox" className="checkbox mt-1" {...register(`${prefix}.minimize_truck_count`)} />
-              <div>
-                <p className="font-semibold text-ink">Minimize truck count</p>
-                <p className="text-sm text-slate-500">Prioritaskan jumlah truck aktif minimum.</p>
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {orderedObjectiveItems.map((item, index) => {
+            const isEnabled = Boolean(watch(`${prefix}.${item.key}`));
+            return (
+              <div
+                key={item.key}
+                draggable
+                onDragStart={() => handleObjectiveDragStart(item.key)}
+                onDragOver={(event) => event.preventDefault()}
+                onDrop={(event) => handleObjectiveDrop(event, item.key)}
+                onDragEnd={() => setDraggedObjectiveKey(null)}
+                className={`rounded-3xl border p-4 transition ${
+                  isEnabled
+                    ? "border-sky-200 bg-sky-50/70"
+                    : "border-slate-200 bg-slate-50"
+                } ${draggedObjectiveKey === item.key ? "opacity-60" : ""}`}
+              >
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-500 shadow-sm">
+                    Priority #{index + 1}
+                  </span>
+                  <span className="cursor-grab text-slate-400" aria-hidden="true">
+                    ⋮⋮
+                  </span>
+                </div>
+                <div className="flex gap-3">
+                  <input type="checkbox" className="checkbox mt-1" {...register(`${prefix}.${item.key}`)} />
+                  <div>
+                    <p className="font-semibold text-ink">{item.label}</p>
+                    <p className="text-sm text-slate-500">{item.description}</p>
+                    <p className="mt-2 text-xs text-slate-400">
+                      Geser kartu ini untuk menaikkan atau menurunkan prioritas objective.
+                    </p>
+                  </div>
+                </div>
               </div>
-            </div>
-          </label>
-          <label className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
-            <div className="flex gap-3">
-              <input type="checkbox" className="checkbox mt-1" {...register(`${prefix}.minimize_distance`)} />
-              <div>
-                <p className="font-semibold text-ink">Minimize distance</p>
-                <p className="text-sm text-slate-500">Gunakan biaya jarak pada objective.</p>
-              </div>
-            </div>
-          </label>
-          <label className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
-            <div className="flex gap-3">
-              <input type="checkbox" className="checkbox mt-1" {...register(`${prefix}.minimize_time`)} />
-              <div>
-                <p className="font-semibold text-ink">Minimize truck time</p>
-                <p className="text-sm text-slate-500">Gunakan biaya waktu pada objective.</p>
-              </div>
-            </div>
-          </label>
+            );
+          })}
         </div>
       </div>
 
@@ -518,19 +618,31 @@ export function OptimizationConfigPanel({
         </div>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-        <label className="field">
-          <span>Vehicle activation weight</span>
-          <input type="number" className="input" {...register(`${prefix}.penalties.fixed_cost_vehicle`, { valueAsNumber: true })} />
-        </label>
-        <label className="field">
-          <span>Distance weight</span>
-          <input type="number" className="input" {...register(`${prefix}.penalties.distance_weight`, { valueAsNumber: true })} />
-        </label>
-        <label className="field">
-          <span>Time weight</span>
-          <input type="number" className="input" {...register(`${prefix}.penalties.time_weight`, { valueAsNumber: true })} />
-        </label>
+      <div className={`grid gap-4 md:grid-cols-2 ${showCostControls ? "lg:grid-cols-5" : "lg:grid-cols-3"}`}>
+        {showCostControls ? (
+          <>
+            <label className="field">
+              <span>Vehicle activation weight</span>
+              <input type="number" className="input" {...register(`${prefix}.penalties.activation_cost_vehicle`, { valueAsNumber: true })} />
+            </label>
+            <label className="field">
+              <span>Distance weight</span>
+              <input type="number" className="input" {...register(`${prefix}.penalties.distance_weight`, { valueAsNumber: true })} />
+            </label>
+            <label className="field">
+              <span>Time weight</span>
+              <input type="number" className="input" {...register(`${prefix}.penalties.time_weight`, { valueAsNumber: true })} />
+            </label>
+            <label className="field">
+              <span>Depot operation time weight</span>
+              <input
+                type="number"
+                className="input"
+                {...register(`${prefix}.penalties.depot_operation_time_weight`, { valueAsNumber: true })}
+              />
+            </label>
+          </>
+        ) : null}
         <label className="field">
           <span>Solver timeout (sec)</span>
           <input type="number" className="input" {...register(`${prefix}.solver_options.max_solver_seconds`, { valueAsNumber: true })} />

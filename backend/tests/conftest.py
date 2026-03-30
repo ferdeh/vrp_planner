@@ -102,7 +102,7 @@ def sample_payload() -> dict:
                 "overtime_penalty_per_minute": 50,
                 "depot_operation_window_penalty_per_minute": 50,
                 "capacity_violation_penalty": 0,
-                "fixed_cost_vehicle": 10000,
+                "activation_cost_vehicle": 10000,
                 "distance_weight": 1,
                 "time_weight": 1,
             },

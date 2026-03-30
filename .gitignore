@@ -10,3 +10,6 @@ coverage/
 backend/.env
 frontend/.env
 backend/alembic.ini
+frontend/*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts

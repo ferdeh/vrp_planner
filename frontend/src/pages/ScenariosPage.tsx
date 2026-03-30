@@ -14,6 +14,11 @@ export function ScenariosPage() {
   const scenariosQuery = useQuery({
     queryKey: ["scenarios"],
     queryFn: listScenarios,
+    staleTime: 0,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: true,
+    refetchInterval: 2000,
+    refetchIntervalInBackground: true,
   });
   const deleteMutation = useMutation({
     mutationFn: deleteScenarios,
@@ -27,6 +32,14 @@ export function ScenariosPage() {
     },
   });
 
+  const handleCompare = () => {
+    if (selectedScenarioIds.length > 4) {
+      setActionMessage("Compare dibatasi maksimum 4 scenario.");
+      return;
+    }
+    navigate(`/scenarios/compare?ids=${selectedScenarioIds.join(",")}`);
+  };
+
   return (
     <AppLayout>
       <PageHeader
@@ -38,9 +51,7 @@ export function ScenariosPage() {
               type="button"
               className="btn-secondary"
               disabled={selectedScenarioIds.length < 2}
-              onClick={() =>
-                navigate(`/scenarios/compare?ids=${selectedScenarioIds.join(",")}`)
-              }
+              onClick={handleCompare}
             >
               Compare
             </button>

@@ -8,6 +8,8 @@ export function TruckTableField({
   syncDisabled,
   syncLoading,
   syncMessage,
+  syncMessageTone = "info",
+  errorMessage,
 }: {
   control: Control<OptimizationRequest>;
   register: UseFormRegister<OptimizationRequest>;
@@ -15,11 +17,15 @@ export function TruckTableField({
   syncDisabled: boolean;
   syncLoading: boolean;
   syncMessage?: string | null;
+  syncMessageTone?: "info" | "error";
+  errorMessage?: string;
 }) {
   const { fields } = useFieldArray({
     control,
     name: "available_trucks",
   });
+  const tableHasError = Boolean(errorMessage);
+  const messageClass = syncMessageTone === "error" ? "error-text" : "text-sm text-amber-700";
 
   return (
     <div className="space-y-4">
@@ -37,7 +43,7 @@ export function TruckTableField({
           {syncLoading ? "Sync Truck..." : "Sync Truck"}
         </button>
       </div>
-      <div className="table-shell">
+      <div className={`table-shell ${tableHasError ? "section-error" : ""}`}>
         <table>
           <thead>
             <tr>
@@ -69,16 +75,8 @@ export function TruckTableField({
                     })}
                   />
                   <input type="hidden" {...register(`available_trucks.${index}.capacity_kl`, { valueAsNumber: true })} />
-                  <input type="hidden" {...register(`available_trucks.${index}.fixed_cost`, { valueAsNumber: true })} />
                   <input
-                    type="hidden"
-                    {...register(`available_trucks.${index}.variable_cost_per_km`, { valueAsNumber: true })}
-                  />
-                  <input
-                    type="hidden"
-                    {...register(`available_trucks.${index}.variable_cost_per_minute`, { valueAsNumber: true })}
-                  />
-                  <input type="hidden" {...register(`available_trucks.${index}.start_depot_id`)} />
+                    type="hidden" {...register(`available_trucks.${index}.start_depot_id`)} />
                   <input type="hidden" {...register(`available_trucks.${index}.end_depot_id`)} />
                   <input type="hidden" {...register(`available_trucks.${index}.shift_start`)} />
                   <input type="hidden" {...register(`available_trucks.${index}.shift_end`)} />
@@ -128,9 +126,11 @@ export function TruckTableField({
         </table>
       </div>
       <p className="text-sm text-slate-500">
-        Tombol sync truck akan mengambil master data truck dari depot yang dipilih dan menambahkan unit yang available.
+        Tombol sync truck akan mengambil unit truck yang available dari depot terpilih. Perhitungan cost solver memakai
+        activation cost, distance weight, dan time weight dari setting internal app.
       </p>
-      {syncMessage ? <p className="text-sm text-amber-700">{syncMessage}</p> : null}
+      {errorMessage ? <p className="error-text">{errorMessage}</p> : null}
+      {syncMessage ? <p className={messageClass}>{syncMessage}</p> : null}
     </div>
   );
 }

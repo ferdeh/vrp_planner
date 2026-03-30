@@ -1,8 +1,11 @@
-export type SolutionStatus = "feasible" | "infeasible" | "partial" | "error";
+export type SolutionStatus = "processing" | "feasible" | "infeasible" | "partial" | "timeout" | "error";
+export type AnalysisLevel = "level_1" | "level_2";
+export type AnalysisStatus = "processing" | "completed" | "error";
 
 export interface OrderInput {
   order_id: string;
   spbu_id: string;
+  spbu_name?: string | null;
   product_type: string;
   demand_kl: number;
   priority: boolean;
@@ -27,15 +30,24 @@ export interface DepotData {
   gate_limit?: number | null;
 }
 
+export interface SpbuData {
+  spbu_id: string;
+  name: string;
+  lat: number;
+  lng: number;
+  time_window_start: string;
+  time_window_end: string;
+  truck_category?: number | null;
+  allowed_truck_types?: string[];
+  supply_depot_ids?: string[];
+}
+
 export interface TruckInput {
   truck_id: string;
   no_polisi?: string | null;
   truck_type: string;
   truck_category?: number | null;
   capacity_kl: number;
-  fixed_cost: number;
-  variable_cost_per_km: number;
-  variable_cost_per_minute: number;
   start_depot_id: string;
   end_depot_id: string;
   shift_start: string;
@@ -53,9 +65,6 @@ export interface TruckMasterData {
   truck_type: string;
   truck_category?: number | null;
   capacity_kl: number;
-  fixed_cost: number;
-  variable_cost_per_km: number;
-  variable_cost_per_minute: number;
   depot_id: string;
   shift_start: string;
   shift_end: string;
@@ -67,10 +76,36 @@ export interface TruckMasterData {
   not_available_to?: string | null;
 }
 
+export interface MasterNetworkNode {
+  node_id: string;
+  node_code: string;
+  node_name: string;
+  node_type: string;
+  lat: number;
+  lng: number;
+  layout_x?: number | null;
+  layout_y?: number | null;
+  truck_category?: number | null;
+  is_active: boolean;
+  supply_depot_ids: string[];
+}
+
+export interface MasterEffectiveEdge {
+  from_node_id: string;
+  to_node_id: string;
+  distance_km?: number | null;
+  max_velocity_kmh?: number | null;
+  source?: string | null;
+  road_category?: string | null;
+}
+
 export interface OptimizationConfig {
+  minimize_unserved_orders: boolean;
   minimize_truck_count: boolean;
   minimize_distance: boolean;
   minimize_time: boolean;
+  minimize_depot_operation_time: boolean;
+  objective_priority: string[];
   hard_constraints: {
     capacity_limit: boolean;
     time_window: boolean;
@@ -101,9 +136,10 @@ export interface OptimizationConfig {
     overtime_penalty_per_minute: number;
     depot_operation_window_penalty_per_minute: number;
     capacity_violation_penalty: number;
-    fixed_cost_vehicle: number;
+    activation_cost_vehicle: number;
     distance_weight: number;
     time_weight: number;
+    depot_operation_time_weight: number;
   };
   solver_options: {
     max_solver_seconds: number;
@@ -144,12 +180,27 @@ export interface TruckTypeSummary {
   total_capacity_kl: number;
 }
 
+export interface CostBreakdown {
+  activation_cost_total: number;
+  distance_cost_total: number;
+  time_cost_total: number;
+  depot_operation_cost_total: number;
+  late_arrival_penalty_total: number;
+  priority_eta_penalty_total: number;
+  overtime_penalty_total: number;
+  max_total_distance_penalty_total: number;
+  unserved_penalty_total: number;
+  depot_operation_window_penalty_total: number;
+  total_penalty_cost: number;
+  total_cost: number;
+}
+
 export interface RouteStopResponse {
   sequence: number;
   order_id: string;
   parent_order_id: string;
   spbu_id: string;
-  stop_kind: "delivery" | "depot_reload";
+  stop_kind: "delivery" | "depot_reload" | "depot_wait";
   trip_sequence: number;
   spbu_name?: string | null;
   travel_path?: string | null;
@@ -192,6 +243,7 @@ export interface UnservedOrderDetail {
   spbu_id: string;
   demand_kl: number;
   reason: string;
+  constraint_details: string[];
 }
 
 export interface PreprocessingNote {
@@ -214,6 +266,7 @@ export interface OptimizationResultResponse {
   total_time: number;
   total_cost: number;
   total_penalty: number;
+  cost_breakdown: CostBreakdown;
   total_depot_operation_time_minutes: number;
   depot_operation_start?: string | null;
   depot_operation_end?: string | null;
@@ -222,6 +275,13 @@ export interface OptimizationResultResponse {
   route_details: RouteDetailResponse[];
   unserved_orders: UnservedOrderDetail[];
   preprocessing_notes: PreprocessingNote[];
+}
+
+export interface OptimizationJobResponse {
+  scenario_id: string;
+  status: SolutionStatus;
+  message: string;
+  created_at: string;
 }
 
 export interface ScenarioListItem {
@@ -252,6 +312,94 @@ export interface ScenarioDetailResponse extends OptimizationResultResponse {
   input_orders: OrderInput[];
   input_trucks: TruckInput[];
   created_at: string;
+}
+
+export interface ScenarioAnalysisExperimentResult {
+  experiment_id: string;
+  title: string;
+  summary: string;
+  scenario_status: SolutionStatus;
+  solver_status: string;
+  assignment_found: boolean;
+  total_unserved_orders: number;
+  total_cost: number;
+  solver_runtime_seconds: number;
+  changed_assumptions: string[];
+}
+
+export interface ScenarioAnalysisProblematicOrder {
+  order_id: string;
+  spbu_id: string;
+  priority: boolean;
+  eta?: string | null;
+  heuristic_score: number;
+  experimental_score: number;
+  total_score: number;
+  reasons: string[];
+}
+
+export interface ScenarioAnalysisReport {
+  root_cause_summary: string;
+  solver_status_explained: string;
+  key_findings: string[];
+  recommended_actions: string[];
+  problematic_orders: ScenarioAnalysisProblematicOrder[];
+  experiment_results: ScenarioAnalysisExperimentResult[];
+}
+
+export interface ScenarioAnalysisCreateRequest {
+  level: AnalysisLevel;
+}
+
+export interface ScenarioAnalysisJobResponse {
+  analysis_id: string;
+  scenario_id: string;
+  level: AnalysisLevel;
+  status: AnalysisStatus;
+  message: string;
+  created_at: string;
+}
+
+export interface ScenarioAnalysisListItem {
+  analysis_id: string;
+  scenario_id: string;
+  level: AnalysisLevel;
+  status: AnalysisStatus;
+  message: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ScenarioAnalysisQueryResponse {
+  items: ScenarioAnalysisListItem[];
+}
+
+export interface ScenarioAnalysisOverviewItem {
+  analysis_id: string;
+  scenario_id: string;
+  dispatch_date: string;
+  depot_id: string;
+  scenario_status: SolutionStatus;
+  level: AnalysisLevel;
+  status: AnalysisStatus;
+  message: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ScenarioAnalysisOverviewResponse {
+  items: ScenarioAnalysisOverviewItem[];
+}
+
+export interface ScenarioAnalysisDetailResponse {
+  analysis_id: string;
+  scenario_id: string;
+  level: AnalysisLevel;
+  status: AnalysisStatus;
+  message: string;
+  report?: ScenarioAnalysisReport | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface MasterDataListResponse {

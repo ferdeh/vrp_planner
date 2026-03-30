@@ -32,12 +32,17 @@ export function RouteStopsTable({
       path: stop.travel_path || "-",
       maxVelocity: stop.segment_max_velocity_kmh || "-",
       driveMinutes: stop.travel_time_minutes ?? "-",
-      orderId: stop.stop_kind === "depot_reload" ? "DEPOT RELOAD" : stop.order_id,
-      parentOrderId: stop.stop_kind === "depot_reload" ? "-" : stop.parent_order_id,
+      orderId:
+        stop.stop_kind === "depot_reload"
+          ? "DEPOT RELOAD"
+          : stop.stop_kind === "depot_wait"
+            ? "DEPOT WAIT"
+            : stop.order_id,
+      parentOrderId: stop.stop_kind === "delivery" ? stop.parent_order_id : "-",
       destinationName: stop.spbu_name || "-",
       eta: stop.eta,
       etd: stop.etd,
-      volume: stop.stop_kind === "depot_reload" ? "-" : stop.delivered_volume,
+      volume: stop.stop_kind === "delivery" ? stop.delivered_volume : "-",
       status: stop.arrival_status,
     };
   });

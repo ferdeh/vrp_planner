@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, JSON, String, Text, desc
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -46,6 +46,11 @@ class Scenario(Base, TimestampMixin):
         back_populates="scenario",
         uselist=False,
         cascade="all, delete-orphan",
+    )
+    diagnostics: Mapped[list["ScenarioDiagnostic"]] = relationship(
+        back_populates="scenario",
+        cascade="all, delete-orphan",
+        order_by=lambda: desc(ScenarioDiagnostic.created_at),
     )
 
 
@@ -207,6 +212,23 @@ class UnservedOrder(Base):
     reason: Mapped[str] = mapped_column(Text, nullable=False)
 
     result: Mapped[OptimizationResult] = relationship(back_populates="unserved_orders")
+
+
+class ScenarioDiagnostic(Base, TimestampMixin):
+    __tablename__ = "scenario_diagnostics"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid_str)
+    scenario_id: Mapped[str] = mapped_column(
+        ForeignKey("scenarios.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    level: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="processing")
+    message: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    report_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+    scenario: Mapped[Scenario] = relationship(back_populates="diagnostics")
 
 
 class SystemSettings(Base, TimestampMixin):

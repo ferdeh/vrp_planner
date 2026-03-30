@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from ortools.constraint_solver import pywrapcp
 
 from app.services.preprocessing_service import PreprocessedProblem
+from app.solver.objective import effective_unserved_penalty, objective_priority_scale
 from app.utils.time_utils import hhmm_to_minutes
 
 
@@ -118,6 +119,8 @@ def apply_time_constraints(
     routing: pywrapcp.RoutingModel,
     manager: pywrapcp.RoutingIndexManager,
     problem: PreprocessedProblem,
+    *,
+    include_soft_priority_eta_objective: bool = True,
 ) -> TimeConstraintArtifacts:
     """Create the time dimension and apply windows/shift policies."""
 
@@ -150,6 +153,15 @@ def apply_time_constraints(
     depot_operation_end_vars: list[pywrapcp.IntVar] = []
     extra_objective_vars: list[pywrapcp.IntVar] = []
     extra_objective_weights: list[int] = []
+    depot_operation_weight = max(
+        0,
+        int(
+            round(
+                problem.config.penalties.depot_operation_time_weight
+                * objective_priority_scale(problem.config, "minimize_depot_operation_time")
+            )
+        ),
+    )
 
     def register_depot_operation_window(
         condition: pywrapcp.IntVar,
@@ -168,6 +180,7 @@ def apply_time_constraints(
     for vehicle_id, truck in enumerate(problem.trucks):
         start_var = dimension.CumulVar(routing.Start(vehicle_id))
         end_var = dimension.CumulVar(routing.End(vehicle_id))
+        active_vehicle = routing.ActiveVehicleVar(vehicle_id)
         shift_start = hhmm_to_minutes(truck.shift_start)
         shift_end = hhmm_to_minutes(truck.shift_end)
         working_time_limit = (
@@ -195,12 +208,12 @@ def apply_time_constraints(
             service_interval = solver.FixedDurationIntervalVar(
                 service_start,
                 problem.depot_service_time_minutes,
-                routing.ActiveVehicleVar(vehicle_id),
+                active_vehicle,
                 f"depot_service_{vehicle_id}",
             )
             solver.Add(service_interval.SafeEndExpr(shift_start) == start_var)
             register_depot_operation_window(
-                routing.ActiveVehicleVar(vehicle_id),
+                active_vehicle,
                 service_start,
                 service_end,
                 f"depot_operation_start_{vehicle_id}",
@@ -259,7 +272,8 @@ def apply_time_constraints(
                 int(problem.config.penalties.late_arrival_penalty_per_minute),
             )
         if (
-            problem.config.soft_constraints.priority_eta
+            include_soft_priority_eta_objective
+            and problem.config.soft_constraints.priority_eta
             and not problem.config.hard_constraints.priority_eta
             and shipment.priority_eta_minutes is not None
         ):
@@ -326,6 +340,14 @@ def apply_time_constraints(
         solver.Add(depot_operation_active_count == solver.Sum(depot_operation_active_vars))
         solver.Add(solver.MinEquality(depot_operation_start_vars, earliest_start))
         solver.Add(solver.MaxEquality(depot_operation_end_vars, latest_end))
+        if problem.config.minimize_depot_operation_time and depot_operation_weight > 0:
+            # Align the solver objective with reporting by minimizing the
+            # global depot active span: latest depot activity minus earliest
+            # depot activity across initial loading and reload operations.
+            depot_operation_span = solver.IntVar(0, horizon, "depot_operation_span")
+            solver.Add(depot_operation_span == solver.Max(latest_end - earliest_start, 0))
+            extra_objective_vars.append(depot_operation_span)
+            extra_objective_weights.append(depot_operation_weight)
         if problem.config.hard_constraints.depot_operation_window:
             solver.Add(earliest_start >= problem.depot_operation_window_start)
             solver.Add(latest_end <= problem.depot_operation_window_end)
@@ -371,14 +393,31 @@ def apply_optional_visits(
     manager: pywrapcp.RoutingIndexManager,
     problem: PreprocessedProblem,
 ) -> None:
-    """Allow solver to drop visits when configured."""
+    """Allow solver to drop visits when configured.
+
+    Priority shipments remain mandatory whenever priority ETA is modeled,
+    whether as a hard on-time constraint or as a soft lateness penalty.
+    """
 
     if not problem.config.soft_constraints.allow_unserved_orders:
         for reload_node in problem.reload_nodes:
             routing.AddDisjunction([manager.NodeToIndex(reload_node.node_index)], 0)
-        return
-    penalty = int(problem.config.penalties.unserved_order_penalty)
-    for shipment in problem.shipments:
-        routing.AddDisjunction([manager.NodeToIndex(shipment.node_index)], penalty)
+    else:
+        penalty = effective_unserved_penalty(problem.config)
+        for shipment in problem.shipments:
+            shipment_is_mandatory = shipment.priority and (
+                problem.config.hard_constraints.priority_eta
+                or problem.config.soft_constraints.priority_eta
+            )
+            if shipment_is_mandatory:
+                continue
+            routing.AddDisjunction([manager.NodeToIndex(shipment.node_index)], penalty)
+        for reload_node in problem.reload_nodes:
+            routing.AddDisjunction([manager.NodeToIndex(reload_node.node_index)], 0)
+
+    solver = routing.solver()
     for reload_node in problem.reload_nodes:
-        routing.AddDisjunction([manager.NodeToIndex(reload_node.node_index)], 0)
+        reload_index = manager.NodeToIndex(reload_node.node_index)
+        for vehicle_id in range(len(problem.trucks)):
+            solver.Add(routing.NextVar(routing.Start(vehicle_id)) != reload_index)
+            solver.Add(routing.NextVar(reload_index) != routing.End(vehicle_id))

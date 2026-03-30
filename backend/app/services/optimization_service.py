@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+from uuid import UUID
 
+from ortools.constraint_solver import routing_enums_pb2
 from sqlalchemy.orm import Session
 
 from app.models import schemas
@@ -31,7 +33,7 @@ class OptimizationService:
         self.solver = OrToolsSolver()
         self.result_service = ResultService()
 
-    def optimize(self, payload: schemas.OptimizationRequest) -> schemas.OptimizationResultResponse:
+    def _merge_config(self, payload: schemas.OptimizationRequest) -> schemas.OptimizationConfig:
         settings_row = self.settings_repository.get_active()
         settings_payload = schemas.SystemSettingsPayload(
             default_optimization_config=schemas.OptimizationConfig.model_validate(
@@ -39,9 +41,34 @@ class OptimizationService:
             ),
             ui_preferences=settings_row.ui_preferences,
         )
-        merged_config = self.constraint_service.merge_config(settings_payload, payload.optimization_config)
-        scenario_snapshot = payload.model_copy(update={"optimization_config": merged_config})
-        scenario = self.scenario_repository.create_scenario_snapshot(scenario_snapshot)
+        return self.constraint_service.merge_config(settings_payload, payload.optimization_config)
+
+    def create_job(
+        self,
+        payload: schemas.OptimizationRequest,
+    ) -> tuple[schemas.OptimizationJobResponse, schemas.OptimizationRequest]:
+        merged_config = self._merge_config(payload)
+        prepared_payload = payload.model_copy(update={"optimization_config": merged_config})
+        scenario = self.scenario_repository.create_scenario_snapshot(prepared_payload)
+        return (
+            schemas.OptimizationJobResponse(
+                scenario_id=UUID(scenario.id),
+                status="processing",
+                message="Optimization is in progress.",
+                created_at=scenario.created_at,
+            ),
+            prepared_payload,
+        )
+
+    def process_job(
+        self,
+        scenario_id: UUID | str,
+        payload: schemas.OptimizationRequest,
+    ) -> None:
+        scenario = self.scenario_repository.get_scenario(scenario_id)
+        if scenario is None:
+            raise ValueError(f"Scenario {scenario_id} not found.")
+        merged_config = payload.optimization_config or self._merge_config(payload)
 
         try:
             problem = self.preprocessing_service.preprocess(payload, merged_config)
@@ -51,6 +78,7 @@ class OptimizationService:
                     assignment=None,
                     runtime_seconds=0.0,
                     message="No feasible shipments remained after preprocessing.",
+                    search_status=routing_enums_pb2.RoutingSearchStatus.ROUTING_INFEASIBLE,
                 )
                 result = schemas.OptimizationResultResponse(
                     scenario_id=scenario.id,
@@ -84,7 +112,6 @@ class OptimizationService:
                 solver_output = self.solver.solve(problem)
                 result = self.result_service.build_response(scenario.id, problem, solver_output)
             self.result_repository.save_result(scenario, result)
-            return result
         except Exception as exc:
             logger.exception("Optimization failed for scenario %s", scenario.id)
             error_result = schemas.OptimizationResultResponse(
@@ -117,4 +144,3 @@ class OptimizationService:
                 preprocessing_notes=[],
             )
             self.result_repository.save_result(scenario, error_result)
-            return error_result

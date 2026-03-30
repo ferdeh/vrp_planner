@@ -1,5 +1,12 @@
-import { useFieldArray, useWatch, type Control, type UseFormRegister, type UseFormSetValue } from "react-hook-form";
-import type { OptimizationRequest } from "../../types/api";
+import {
+  useFieldArray,
+  useWatch,
+  type Control,
+  type FieldErrors,
+  type UseFormRegister,
+  type UseFormSetValue,
+} from "react-hook-form";
+import type { OptimizationRequest, SpbuData } from "../../types/api";
 
 const productOptions = [
   { value: "PERTALITE", label: "Pertalite" },
@@ -19,14 +26,18 @@ export function OrderTableField({
   depotSelected,
   onLoadSample,
   sampleMessage,
+  sampleMessageTone = "info",
+  errors,
 }: {
   control: Control<OptimizationRequest>;
   register: UseFormRegister<OptimizationRequest>;
   setValue: UseFormSetValue<OptimizationRequest>;
-  spbuOptions: Array<Record<string, unknown>>;
+  spbuOptions: SpbuData[];
   depotSelected: boolean;
   onLoadSample?: () => void;
   sampleMessage?: string | null;
+  sampleMessageTone?: "info" | "error";
+  errors?: FieldErrors<OptimizationRequest>["orders"];
 }) {
   const { fields, append, remove } = useFieldArray({
     control,
@@ -36,6 +47,9 @@ export function OrderTableField({
     control,
     name: "orders",
   });
+  const tableHasError = Boolean(errors?.message);
+  const messageClass = sampleMessageTone === "error" ? "error-text" : "text-sm text-sky-700";
+  const getInputClass = (hasError: boolean) => (hasError ? "input input-error" : "input");
 
   return (
     <div className="space-y-4">
@@ -71,7 +85,7 @@ export function OrderTableField({
           </button>
         </div>
       </div>
-      <div className="table-shell">
+      <div className={`table-shell ${tableHasError ? "section-error" : ""}`}>
         <table>
           <thead>
             <tr>
@@ -88,11 +102,18 @@ export function OrderTableField({
           <tbody>
             {fields.map((field, index) => {
               const isPriority = Boolean(watchedOrders?.[index]?.priority);
+              const rowError = Array.isArray(errors) ? errors[index] : undefined;
               return (
                 <tr key={field.id}>
-                  <td><input className="input" {...register(`orders.${index}.order_id`)} /></td>
                   <td>
-                    <select className="input" {...register(`orders.${index}.spbu_id`)}>
+                    <input
+                      className={getInputClass(Boolean(rowError?.order_id))}
+                      {...register(`orders.${index}.order_id`)}
+                    />
+                    {rowError?.order_id?.message ? <p className="mt-2 error-text">{rowError.order_id.message}</p> : null}
+                  </td>
+                  <td>
+                    <select className={getInputClass(Boolean(rowError?.spbu_id))} {...register(`orders.${index}.spbu_id`)}>
                       <option value="">
                         {depotSelected ? "Pilih SPBU" : "Pilih depot terlebih dahulu"}
                       </option>
@@ -102,25 +123,38 @@ export function OrderTableField({
                         </option>
                       ))}
                     </select>
+                    {rowError?.spbu_id?.message ? <p className="mt-2 error-text">{rowError.spbu_id.message}</p> : null}
                   </td>
                   <td>
-                    <select className="input" {...register(`orders.${index}.product_type`)}>
+                    <select className={getInputClass(Boolean(rowError?.product_type))} {...register(`orders.${index}.product_type`)}>
                       {productOptions.map((item) => (
                         <option key={item.value} value={item.value}>
                           {item.label}
                         </option>
                       ))}
                     </select>
+                    {rowError?.product_type?.message ? <p className="mt-2 error-text">{rowError.product_type.message}</p> : null}
                   </td>
-                  <td><input type="number" step="0.1" className="input" {...register(`orders.${index}.demand_kl`, { valueAsNumber: true })} /></td>
+                  <td>
+                    <input
+                      type="number"
+                      step="0.1"
+                      className={getInputClass(Boolean(rowError?.demand_kl))}
+                      {...register(`orders.${index}.demand_kl`, { valueAsNumber: true })}
+                    />
+                    {rowError?.demand_kl?.message ? <p className="mt-2 error-text">{rowError.demand_kl.message}</p> : null}
+                  </td>
                   <td>
                     <input
                       type="number"
                       min="0"
                       step="5"
-                      className="input"
+                      className={getInputClass(Boolean(rowError?.service_time_minutes))}
                       {...register(`orders.${index}.service_time_minutes`, { valueAsNumber: true })}
                     />
+                    {rowError?.service_time_minutes?.message ? (
+                      <p className="mt-2 error-text">{rowError.service_time_minutes.message}</p>
+                    ) : null}
                   </td>
                   <td className="text-center">
                     <input
@@ -138,11 +172,12 @@ export function OrderTableField({
                   </td>
                   <td>
                     <input
-                      className="input"
+                      className={getInputClass(Boolean(rowError?.eta))}
                       placeholder={isPriority ? "HH:MM" : "Checklist priority"}
                       disabled={!isPriority}
                       {...register(`orders.${index}.eta`)}
                     />
+                    {rowError?.eta?.message ? <p className="mt-2 error-text">{rowError.eta.message}</p> : null}
                   </td>
                   <td>
                     <button type="button" className="text-sm font-semibold text-rose-600" onClick={() => remove(index)}>
@@ -158,7 +193,8 @@ export function OrderTableField({
       <p className="text-sm text-slate-500">
         Opsi SPBU diambil dari master data node `SPBU` dan difilter berdasarkan depot yang dipilih. Waktu service default adalah 30 menit. ETA hanya aktif untuk order yang ditandai priority.
       </p>
-      {sampleMessage ? <p className="text-sm text-sky-700">{sampleMessage}</p> : null}
+      {errors?.message ? <p className="error-text">{errors.message}</p> : null}
+      {sampleMessage ? <p className={messageClass}>{sampleMessage}</p> : null}
     </div>
   );
 }

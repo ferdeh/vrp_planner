@@ -117,6 +117,40 @@ class MasterDataClient:
                 return depot
         raise ValueError(f"Depot {depot_id} not found in master data.")
 
+    def list_network_nodes(self, node_ids: list[str] | None = None) -> list[schemas.NetworkNodeData]:
+        if self.settings.use_mock_master_data:
+            items = self._build_mock_network_nodes()
+            if not node_ids:
+                return items
+            allowed = set(node_ids)
+            return [item for item in items if item.node_id in allowed]
+
+        raw_nodes = self._get(self.settings.api_paths["nodes"])
+        allowed = set(node_ids) if node_ids else None
+        items: list[schemas.NetworkNodeData] = []
+        for item in raw_nodes:
+            node_id = str(item["node_id"])
+            if allowed is not None and node_id not in allowed:
+                continue
+            items.append(
+                schemas.NetworkNodeData(
+                    node_id=node_id,
+                    node_code=str(item.get("node_code") or node_id),
+                    node_name=str(item.get("node_name") or item.get("node_code") or node_id),
+                    node_type=str(item.get("node_type") or "POI").upper(),
+                    lat=float(item.get("lat", 0.0)),
+                    lng=float(item.get("lon", item.get("lng", 0.0))),
+                    layout_x=self._normalize_float(item.get("layout_x")),
+                    layout_y=self._normalize_float(item.get("layout_y")),
+                    truck_category=self._normalize_truck_category(item),
+                    is_active=self._normalize_bool(item.get("is_active"), default=True),
+                    supply_depot_ids=[
+                        str(value) for value in item.get("supply_depot_ids", []) if value not in (None, "")
+                    ],
+                )
+            )
+        return items
+
     def _list_spbu_from_nodes(self, depot_id: str | None = None) -> list[schemas.SPBUData]:
         raw_nodes = self._get(self.settings.api_paths["nodes"])
         spbu_list = []
@@ -188,6 +222,53 @@ class MasterDataClient:
             if parsed > 0:
                 return parsed
         return None
+
+    def _normalize_bool(self, value: object, default: bool) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "y", "active"}
+        return default
+
+    def _normalize_float(self, value: object) -> float | None:
+        if value in (None, ""):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _build_mock_network_nodes(self) -> list[schemas.NetworkNodeData]:
+        items: list[schemas.NetworkNodeData] = []
+        for depot in self.list_depots():
+            items.append(
+                schemas.NetworkNodeData(
+                    node_id=depot.depot_id,
+                    node_code=depot.depot_id,
+                    node_name=depot.name,
+                    node_type="DEPOT",
+                    lat=depot.lat,
+                    lng=depot.lng,
+                )
+            )
+        for spbu in self.list_spbu():
+            items.append(
+                schemas.NetworkNodeData(
+                    node_id=spbu.spbu_id,
+                    node_code=spbu.spbu_id,
+                    node_name=spbu.name,
+                    node_type="SPBU",
+                    lat=spbu.lat,
+                    lng=spbu.lng,
+                    truck_category=spbu.truck_category,
+                    supply_depot_ids=spbu.supply_depot_ids,
+                )
+            )
+        return items
 
     def _get(self, path: str):
         url = f"{self.settings.master_data_api_base_url.rstrip('/')}{path}"

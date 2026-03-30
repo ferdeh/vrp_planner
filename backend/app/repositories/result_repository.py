@@ -67,7 +67,7 @@ class ResultRepository:
                 for route in result.route_details
             ],
             unserved_orders=[
-                db_models.UnservedOrder(**item.model_dump())
+                db_models.UnservedOrder(**item.model_dump(exclude={"constraint_details"}))
                 for item in result.unserved_orders
             ],
         )

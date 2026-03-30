@@ -6,10 +6,12 @@ from datetime import date, datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-SolutionStatus = Literal["feasible", "infeasible", "partial", "error"]
+SolutionStatus = Literal["processing", "feasible", "infeasible", "partial", "timeout", "error"]
+AnalysisLevel = Literal["level_1", "level_2"]
+AnalysisStatus = Literal["processing", "completed", "error"]
 SUPPORTED_PRODUCT_TYPES = [
     "PERTALITE",
     "PERTAMAX",
@@ -18,6 +20,13 @@ SUPPORTED_PRODUCT_TYPES = [
     "BIO_SOLAR",
     "DEXLITE",
     "PERTAMINA_DEX",
+]
+SUPPORTED_OBJECTIVE_KEYS = [
+    "minimize_unserved_orders",
+    "minimize_truck_count",
+    "minimize_distance",
+    "minimize_time",
+    "minimize_depot_operation_time",
 ]
 
 
@@ -43,6 +52,29 @@ class DepotData(BaseModel):
     gate_limit: int | None = None
 
 
+class NetworkNodeData(BaseModel):
+    node_id: str
+    node_code: str
+    node_name: str
+    node_type: str
+    lat: float
+    lng: float
+    layout_x: float | None = None
+    layout_y: float | None = None
+    truck_category: int | None = None
+    is_active: bool = True
+    supply_depot_ids: list[str] = Field(default_factory=list)
+
+
+class EffectiveEdgeData(BaseModel):
+    from_node_id: str
+    to_node_id: str
+    distance_km: float | None = None
+    max_velocity_kmh: float | None = None
+    source: str | None = None
+    road_category: str | None = None
+
+
 class MatrixResponse(BaseModel):
     nodes: list[str]
     matrix: list[list[int]]
@@ -51,6 +83,7 @@ class MatrixResponse(BaseModel):
 class OrderInput(BaseModel):
     order_id: str
     spbu_id: str
+    spbu_name: str | None = None
     product_type: str
     demand_kl: float
     priority: bool = False
@@ -71,9 +104,6 @@ class TruckInput(BaseModel):
     truck_type: str
     truck_category: int | None = None
     capacity_kl: float
-    fixed_cost: float
-    variable_cost_per_km: float
-    variable_cost_per_minute: float
     start_depot_id: str
     end_depot_id: str
     shift_start: str
@@ -100,9 +130,6 @@ class TruckMasterData(BaseModel):
     truck_type: str
     truck_category: int | None = None
     capacity_kl: float
-    fixed_cost: float
-    variable_cost_per_km: float
-    variable_cost_per_minute: float
     depot_id: str
     shift_start: str
     shift_end: str
@@ -157,9 +184,13 @@ class PenaltyConfig(BaseModel):
     overtime_penalty_per_minute: float = 50
     depot_operation_window_penalty_per_minute: float = 50
     capacity_violation_penalty: float = 0
-    fixed_cost_vehicle: float = 10000
+    activation_cost_vehicle: float = Field(
+        default=10000,
+        validation_alias=AliasChoices("activation_cost_vehicle", "fixed_cost_vehicle"),
+    )
     distance_weight: float = 1
     time_weight: float = 1
+    depot_operation_time_weight: float = 1
 
 
 class SolverOptions(BaseModel):
@@ -169,9 +200,12 @@ class SolverOptions(BaseModel):
 
 
 class OptimizationConfig(BaseModel):
+    minimize_unserved_orders: bool = True
     minimize_truck_count: bool = True
     minimize_distance: bool = True
     minimize_time: bool = True
+    minimize_depot_operation_time: bool = True
+    objective_priority: list[str] = Field(default_factory=lambda: list(SUPPORTED_OBJECTIVE_KEYS))
     hard_constraints: HardConstraintConfig = Field(default_factory=HardConstraintConfig)
     soft_constraints: SoftConstraintConfig = Field(default_factory=SoftConstraintConfig)
     penalties: PenaltyConfig = Field(default_factory=PenaltyConfig)
@@ -180,6 +214,18 @@ class OptimizationConfig(BaseModel):
     max_vehicle_working_time_minutes: int | None = None
     max_total_distance_per_vehicle_km: int | None = None
     max_lateness_minutes: int | None = None
+
+    @model_validator(mode="after")
+    def normalize_objective_priority(self) -> "OptimizationConfig":
+        normalized: list[str] = []
+        for item in self.objective_priority:
+            if item in SUPPORTED_OBJECTIVE_KEYS and item not in normalized:
+                normalized.append(item)
+        for item in SUPPORTED_OBJECTIVE_KEYS:
+            if item not in normalized:
+                normalized.append(item)
+        self.objective_priority = normalized
+        return self
 
 
 class OptimizationRequest(BaseModel):
@@ -230,6 +276,7 @@ class UnservedOrderDetail(BaseModel):
     spbu_id: str
     demand_kl: float
     reason: str
+    constraint_details: list[str] = Field(default_factory=list)
 
 
 class RouteStopResponse(BaseModel):
@@ -237,7 +284,7 @@ class RouteStopResponse(BaseModel):
     order_id: str
     parent_order_id: str
     spbu_id: str
-    stop_kind: Literal["delivery", "depot_reload"] = "delivery"
+    stop_kind: Literal["delivery", "depot_reload", "depot_wait"] = "delivery"
     trip_sequence: int = 1
     spbu_name: str | None = None
     travel_path: str | None = None
@@ -280,6 +327,21 @@ class TruckTypeSummary(BaseModel):
     total_capacity_kl: float
 
 
+class CostBreakdown(BaseModel):
+    activation_cost_total: float = 0
+    distance_cost_total: float = 0
+    time_cost_total: float = 0
+    depot_operation_cost_total: float = 0
+    late_arrival_penalty_total: float = 0
+    priority_eta_penalty_total: float = 0
+    overtime_penalty_total: float = 0
+    max_total_distance_penalty_total: float = 0
+    unserved_penalty_total: float = 0
+    depot_operation_window_penalty_total: float = 0
+    total_penalty_cost: float = 0
+    total_cost: float = 0
+
+
 class OptimizationResultResponse(BaseModel):
     scenario_id: UUID
     status: SolutionStatus
@@ -294,6 +356,7 @@ class OptimizationResultResponse(BaseModel):
     total_time: float
     total_cost: float
     total_penalty: float
+    cost_breakdown: CostBreakdown = Field(default_factory=CostBreakdown)
     total_depot_operation_time_minutes: int = 0
     depot_operation_start: str | None = None
     depot_operation_end: str | None = None
@@ -302,6 +365,13 @@ class OptimizationResultResponse(BaseModel):
     route_details: list[RouteDetailResponse]
     unserved_orders: list[UnservedOrderDetail]
     preprocessing_notes: list[PreprocessingNote]
+
+
+class OptimizationJobResponse(BaseModel):
+    scenario_id: UUID
+    status: SolutionStatus
+    message: str
+    created_at: datetime
 
 
 class ScenarioListItem(BaseModel):
@@ -380,3 +450,91 @@ class ScenarioSnapshot(BaseModel):
     orders: list[OrderInput]
     available_trucks: list[TruckInput]
     optimization_config: OptimizationConfig
+
+
+class ScenarioAnalysisExperimentResult(BaseModel):
+    experiment_id: str
+    title: str
+    summary: str
+    scenario_status: SolutionStatus
+    solver_status: str
+    assignment_found: bool
+    total_unserved_orders: int
+    total_cost: float = 0
+    solver_runtime_seconds: float
+    changed_assumptions: list[str] = Field(default_factory=list)
+
+
+class ScenarioAnalysisProblematicOrder(BaseModel):
+    order_id: str
+    spbu_id: str
+    priority: bool
+    eta: str | None = None
+    heuristic_score: float
+    experimental_score: float
+    total_score: float
+    reasons: list[str] = Field(default_factory=list)
+
+
+class ScenarioAnalysisReport(BaseModel):
+    root_cause_summary: str
+    solver_status_explained: str
+    key_findings: list[str] = Field(default_factory=list)
+    recommended_actions: list[str] = Field(default_factory=list)
+    problematic_orders: list[ScenarioAnalysisProblematicOrder] = Field(default_factory=list)
+    experiment_results: list[ScenarioAnalysisExperimentResult] = Field(default_factory=list)
+
+
+class ScenarioAnalysisCreateRequest(BaseModel):
+    level: AnalysisLevel
+
+
+class ScenarioAnalysisJobResponse(BaseModel):
+    analysis_id: UUID
+    scenario_id: UUID
+    level: AnalysisLevel
+    status: AnalysisStatus
+    message: str
+    created_at: datetime
+
+
+class ScenarioAnalysisListItem(BaseModel):
+    analysis_id: UUID
+    scenario_id: UUID
+    level: AnalysisLevel
+    status: AnalysisStatus
+    message: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ScenarioAnalysisQueryResponse(BaseModel):
+    items: list[ScenarioAnalysisListItem]
+
+
+class ScenarioAnalysisOverviewItem(BaseModel):
+    analysis_id: UUID
+    scenario_id: UUID
+    dispatch_date: date
+    depot_id: str
+    scenario_status: SolutionStatus
+    level: AnalysisLevel
+    status: AnalysisStatus
+    message: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ScenarioAnalysisOverviewResponse(BaseModel):
+    items: list[ScenarioAnalysisOverviewItem]
+
+
+class ScenarioAnalysisDetailResponse(BaseModel):
+    analysis_id: UUID
+    scenario_id: UUID
+    level: AnalysisLevel
+    status: AnalysisStatus
+    message: str
+    report: ScenarioAnalysisReport | None = None
+    created_at: datetime
+    updated_at: datetime

@@ -26,11 +26,16 @@ const quickSteps = [
   {
     title: "5. Jalankan dan Evaluasi",
     description:
-      "Periksa summary scenario, route grafik, depot operation, unserved order, dan compare antar scenario.",
+      "Periksa summary scenario, route grafik, route map, depot operation, unserved order, dan compare antar scenario.",
   },
 ];
 
 const objectives = [
+  {
+    title: "Minimize unserved orders",
+    description:
+      "Menjadikan jumlah order yang drop atau tidak terlayani sebagai prioritas paling atas. Ini adalah objective yang paling direkomendasikan untuk operasi harian.",
+  },
   {
     title: "Minimize truck count",
     description: "Mengurangi jumlah truck aktif yang harus keluar depot.",
@@ -42,6 +47,10 @@ const objectives = [
   {
     title: "Minimize truck time",
     description: "Mengurangi total waktu perjalanan truck di jalan.",
+  },
+  {
+    title: "Minimize depot operation time",
+    description: "Mendorong truck gate out lebih pagi dan menyelesaikan rute lebih cepat agar operasi depot tidak molor.",
   },
 ];
 
@@ -64,7 +73,7 @@ const scenarioParameters = [
   },
   {
     name: "ETA priority",
-    description: "Batas target kedatangan untuk order priority.",
+    description: "Batas target kedatangan order priority. Jika SPBU Priority hard maka wajib tepat waktu, jika soft maka keterlambatan kena penalty.",
   },
   {
     name: "Service time order",
@@ -88,6 +97,8 @@ const parameterNotes = [
   "Time window SPBU untuk solver diambil dari `tw_start` dan `tw_end` node SPBU master data.",
   "Field `time_window_start` dan `time_window_end` pada order tetap disimpan di request snapshot, tetapi bukan sumber constraint solver.",
   "Soft `Time window SPBU` tidak memerlukan input value tambahan. Sistem langsung memakai TW master data dan menghitung penalty bila terlambat.",
+  "Order priority tetap wajib dilayani saat `SPBU Priority` aktif sebagai hard maupun soft. Priority baru boleh ikut `Allow unserved` bila `SPBU Priority` tidak aktif.",
+  "Solver tidak lagi langsung mencampur semua objective sekaligus. Sistem sekarang mencari service level terbaik dulu, lalu baru memperbaiki overtime, lateness, dan objective biaya.",
 ];
 
 const hardConstraints = [
@@ -101,7 +112,7 @@ const hardConstraints = [
   },
   {
     title: "SPBU Priority",
-    description: "Order priority wajib tiba sebelum atau sama dengan ETA yang diisi user.",
+    description: "Order priority wajib dilayani dan wajib tiba sebelum atau sama dengan ETA yang diisi user.",
   },
   {
     title: "Truck category",
@@ -132,7 +143,7 @@ const hardConstraints = [
 const softConstraints = [
   {
     title: "Allow unserved",
-    description: "Shipment boleh tidak terlayani dengan penalty.",
+    description: "Shipment boleh tidak terlayani dengan penalty. Order priority hanya boleh ikut rule ini bila SPBU Priority tidak aktif sebagai hard maupun soft.",
   },
   {
     title: "Time window SPBU",
@@ -140,7 +151,7 @@ const softConstraints = [
   },
   {
     title: "SPBU Priority",
-    description: "Truck boleh melewati ETA order priority, tetapi setiap menit terlambat kena penalty.",
+    description: "Order priority tetap wajib dilayani, tetapi truck boleh melewati ETA dan setiap menit terlambat kena penalty.",
   },
   {
     title: "Depot operation window",
@@ -190,9 +201,73 @@ const penalties = [
 const outputs = [
   "Summary scenario menunjukkan truck aktif, distance, time, cost, penalty, dan depot operation.",
   "Route Grafik memperlihatkan urutan pergerakan truck termasuk Depot Service dan Depot Reload.",
+  "Route Map memperlihatkan base edge masterdata dan overlay pergerakan truck per warna di atas graph node SPBU/depot.",
   "Route per MT menampilkan stop detail, ETA, ETD, volume kirim, dan trip per truck.",
   "Unserved order menampilkan order yang tidak terlayani beserta alasannya.",
   "Compare scenario memudahkan membandingkan hasil beberapa skenario pada hari yang sama.",
+];
+
+const routeMapNotes = [
+  "Klik legend nopol truck untuk fokus ke satu truck dan meredupkan overlay truck lain.",
+  "Klik legend `Base Edge Masterdata` untuk menyorot edge masterdata dan membuat overlay truck menjadi abu atau redup.",
+  "Gunakan scroll mouse atau gesture trackpad Mac untuk zoom in / zoom out.",
+  "Gunakan drag pada area map untuk pan ke area graph yang berbeda.",
+];
+
+const solverStages = [
+  {
+    title: "Stage 1, service level",
+    description: "Solver mencari solusi dengan jumlah order unserved seminimal mungkin lebih dulu.",
+  },
+  {
+    title: "Stage 2, repair unserved",
+    description: "Jika hasil masih partial, solver menjalankan repair pass untuk mencoba memasukkan order yang masih drop ke route yang masih punya waktu kerja.",
+  },
+  {
+    title: "Stage 3, lateness dan overtime",
+    description: "Setelah service level terbaik ditemukan, solver memperbaiki penalty ETA priority, time window soft, dan overtime.",
+  },
+  {
+    title: "Stage 4, objective biaya dan efisiensi",
+    description: "Baru setelah itu solver mengoptimalkan truck count, time, distance, dan depot operation time sesuai urutan objective user.",
+  },
+];
+
+const fallbackNotes = [
+  "Jika `Allow unserved` aktif, solver tetap berusaha mengecilkan unserved terlebih dahulu sebelum mengejar efisiensi biaya.",
+  "Jika `Allow unserved` nonaktif dan full-feasible solve timeout, sistem otomatis menjalankan best-effort fallback internal untuk mencari partial solution terbaik.",
+  "Best-effort fallback dipakai agar user tidak hanya menerima timeout kosong saat sebenarnya sistem masih bisa memberi rute operasional terbaik.",
+];
+
+const scenarioAnalysisLevels = [
+  {
+    title: "Level 1, cepat",
+    description:
+      "Memakai heuristik dari hasil scenario existing tanpa rerun solver. Cocok untuk triage cepat dengan respons ringan.",
+    points: [
+      "Menggunakan hasil scenario yang sudah ada, termasuk status solver, unserved order, cluster priority, dan travel time direct depot ke SPBU.",
+      "Menampilkan Root Cause Summary, Solver Status Explained, Key Findings, Recommended Actions, dan ranking order paling problematik.",
+      "Paling cocok saat user butuh analisis cepat tanpa beban komputasi tambahan.",
+    ],
+  },
+  {
+    title: "Level 2, kuat",
+    description:
+      "Menjalankan worker diagnosis terpisah yang melakukan beberapa rerun otomatis untuk menguji akar masalah scenario secara lebih akurat.",
+    points: [
+      "Eksperimen diagnosis mencakup extended timeout, priority only, priority ETA disabled, dan allow unserved on.",
+      "Hasil eksperimen diubah menjadi insight bisnis lewat inference engine, bukan hanya angka teknis solver.",
+      "Paling cocok untuk scenario timeout, infeasible, atau investigasi mendalam sebelum mengubah constraint operasional.",
+    ],
+  },
+];
+
+const scenarioAnalysisOutputs = [
+  "Root Cause Summary merangkum akar masalah skenario dalam bahasa bisnis.",
+  "Solver Status Explained menjelaskan arti status seperti feasible, partial, timeout, dan infeasible.",
+  "Key Findings menyorot temuan paling penting dari scenario atau eksperimen diagnosis.",
+  "Recommended Actions memberi arah tindak lanjut yang bisa dicoba user.",
+  "Ranking Order Paling Problematik menunjukkan order yang paling besar kontribusinya terhadap kesulitan skenario.",
 ];
 
 function GuideSection({
@@ -251,7 +326,7 @@ export function UserGuidePage() {
       <GuideSection
         eyebrow="Objectives"
         title="Arti Objective"
-        description="Objective menentukan preferensi biaya solver. Anda dapat menyalakan lebih dari satu objective sekaligus."
+        description="Objective menentukan preferensi biaya solver. Anda dapat menyalakan lebih dari satu objective sekaligus dan mengubah urutannya dengan drag and drop. Urutan paling atas akan diprioritaskan lebih dulu."
       >
         <div className="grid gap-4 lg:grid-cols-3">
           {objectives.map((item) => (
@@ -260,6 +335,36 @@ export function UserGuidePage() {
               <p className="mt-3 text-sm leading-6 text-slate-600">{item.description}</p>
             </article>
           ))}
+        </div>
+        <div className="rounded-[24px] border border-sky-200 bg-sky-50/80 p-5">
+          <h3 className="text-base font-semibold text-sky-950">Catatan prioritas objective</h3>
+          <p className="mt-2 text-sm leading-6 text-sky-900">
+            Walaupun urutan objective tetap dibaca dari atas ke bawah, solver sekarang selalu mencari service level
+            terbaik lebih dulu agar order tidak terlalu cepat di-drop hanya karena objective efisiensi lain.
+          </p>
+        </div>
+      </GuideSection>
+
+      <GuideSection
+        eyebrow="Solver Flow"
+        title="Cara Solver Bekerja"
+        description="Backend sekarang memakai multi-stage solve agar perilaku lebih dekat ke operasi nyata. Solver tidak langsung mengejar route yang murah, tetapi lebih dulu mencoba mengirim order sebanyak mungkin."
+      >
+        <div className="grid gap-4 lg:grid-cols-2">
+          {solverStages.map((item) => (
+            <article key={item.title} className="rounded-[24px] border border-slate-200 bg-white p-5 shadow-sm">
+              <h3 className="text-base font-semibold text-ink">{item.title}</h3>
+              <p className="mt-3 text-sm leading-6 text-slate-600">{item.description}</p>
+            </article>
+          ))}
+        </div>
+        <div className="rounded-[24px] border border-amber-200 bg-amber-50/90 p-5">
+          <h3 className="text-base font-semibold text-amber-950">Best-effort fallback</h3>
+          <ul className="mt-3 space-y-2 text-sm leading-6 text-amber-900">
+            {fallbackNotes.map((item) => (
+              <li key={item}>- {item}</li>
+            ))}
+          </ul>
         </div>
       </GuideSection>
 
@@ -339,6 +444,42 @@ export function UserGuidePage() {
         <div className="rounded-[24px] border border-slate-200 bg-white p-6 shadow-sm">
           <ul className="list-disc space-y-3 pl-5 text-sm leading-6 text-slate-600">
             {outputs.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+        </div>
+        <div className="rounded-[24px] border border-sky-200 bg-sky-50/80 p-5">
+          <h3 className="text-base font-semibold text-sky-950">Interaksi Route Map</h3>
+          <ul className="mt-3 list-disc space-y-2 pl-5 text-sm leading-6 text-sky-950/80">
+            {routeMapNotes.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+        </div>
+      </GuideSection>
+
+      <GuideSection
+        eyebrow="Scenario Analysis"
+        title="Level Analysis"
+        description="Scenario Analysis membantu user mendiagnosis akar masalah skenario. Fitur ini terpisah dari solver utama dan tersedia dalam dua level kedalaman."
+      >
+        <div className="grid gap-4 lg:grid-cols-2">
+          {scenarioAnalysisLevels.map((item) => (
+            <article key={item.title} className="rounded-[24px] border border-slate-200 bg-white p-5 shadow-sm">
+              <h3 className="text-lg font-semibold text-ink">{item.title}</h3>
+              <p className="mt-3 text-sm leading-6 text-slate-600">{item.description}</p>
+              <ul className="mt-4 list-disc space-y-2 pl-5 text-sm leading-6 text-slate-600">
+                {item.points.map((point) => (
+                  <li key={point}>{point}</li>
+                ))}
+              </ul>
+            </article>
+          ))}
+        </div>
+        <div className="rounded-[24px] border border-sky-200 bg-sky-50/80 p-5">
+          <h3 className="text-base font-semibold text-sky-950">Apa yang dibaca user dari Scenario Analysis</h3>
+          <ul className="mt-3 list-disc space-y-2 pl-5 text-sm leading-6 text-sky-950/80">
+            {scenarioAnalysisOutputs.map((item) => (
               <li key={item}>{item}</li>
             ))}
           </ul>
