@@ -9,6 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.api.routes.auth import router as auth_router
 from app.api.routes.health import router as health_router
 from app.api.routes.master_data_proxy import router as master_data_router
 from app.api.routes.optimization import router as optimization_router
@@ -64,6 +65,7 @@ def generic_error_handler(_: Request, exc: Exception) -> JSONResponse:
 
 
 app.include_router(health_router)
+app.include_router(auth_router)
 app.include_router(settings_router)
 app.include_router(optimization_router)
 app.include_router(scenario_router)

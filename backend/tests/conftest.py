@@ -125,7 +125,7 @@ def configured_modules(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
     monkeypatch.setenv("USE_MOCK_MASTER_DATA", "true")
     monkeypatch.setenv("APP_ENV", "test")
-    monkeypatch.setenv("MASTER_DATA_API_BASE_URL", "http://host.docker.internal:8000")
+    monkeypatch.setenv("MASTER_DATA_API_BASE_URL", "http://spbu-backend:8000")
 
     from app.core import config as config_module
     from app.core import database as database_module

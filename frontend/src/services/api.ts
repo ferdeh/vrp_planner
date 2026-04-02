@@ -25,12 +25,7 @@ function resolveApiBaseUrl() {
     return configuredBaseUrl;
   }
 
-  if (typeof window === "undefined") {
-    return "http://localhost:8080";
-  }
-
-  const { protocol, hostname } = window.location;
-  return `${protocol}//${hostname}:8080`;
+  return "";
 }
 
 const baseURL = resolveApiBaseUrl();

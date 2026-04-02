@@ -30,27 +30,39 @@ DEFAULT_CORS_ORIGIN_REGEX = (
 class Settings(BaseModel):
     """Environment-backed application settings."""
 
-    app_name: str = Field(default_factory=lambda: os.getenv("APP_NAME", "vrp_dispatch_optimizer"))
+    app_name: str = Field(default_factory=lambda: os.getenv("APP_NAME", "vrp_planner"))
     app_env: str = Field(default_factory=lambda: os.getenv("APP_ENV", "dev"))
     app_host: str = Field(default_factory=lambda: os.getenv("APP_HOST", "0.0.0.0"))
     app_port: int = Field(default_factory=lambda: int(os.getenv("APP_PORT", "8080")))
     database_url: str = Field(
         default_factory=lambda: os.getenv(
             "DATABASE_URL",
-            "postgresql+psycopg2://postgres:postgres@db:5432/vrp_optimizer",
+            "postgresql+psycopg2://planner:planner@planner-db:5432/vrp_planner",
         )
     )
     master_data_api_base_url: str = Field(
         default_factory=lambda: os.getenv(
             "MASTER_DATA_API_BASE_URL",
-            "http://host.docker.internal:8000",
+            "http://spbu-backend:8000",
         )
     )
     truck_master_data_api_base_url: str = Field(
         default_factory=lambda: os.getenv(
             "TRUCK_MASTER_DATA_API_BASE_URL",
-            "http://host.docker.internal:8002",
+            "http://truck-backend:8000",
         )
+    )
+    planner_public_base_url: str = Field(
+        default_factory=lambda: os.getenv("PLANNER_PUBLIC_BASE_URL", "http://planner.localhost:8088")
+    )
+    planner_auth_logout_url: str = Field(
+        default_factory=lambda: os.getenv(
+            "PLANNER_AUTH_LOGOUT_URL",
+            "http://auth.localhost:8088/realms/vrp-platform/protocol/openid-connect/logout",
+        )
+    )
+    planner_oauth_client_id: str = Field(
+        default_factory=lambda: os.getenv("PLANNER_OAUTH_CLIENT_ID", "oauth2-proxy-planner")
     )
     use_mock_master_data: bool = Field(default_factory=lambda: _get_bool("USE_MOCK_MASTER_DATA", False))
     solver_max_seconds: int = Field(default_factory=lambda: int(os.getenv("SOLVER_MAX_SECONDS", "30")))
@@ -64,7 +76,7 @@ class Settings(BaseModel):
     cors_origins: list[str] = Field(
         default_factory=lambda: [
             origin.strip()
-            for origin in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+            for origin in os.getenv("CORS_ORIGINS", "http://planner.localhost:8088").split(",")
             if origin.strip()
         ]
     )

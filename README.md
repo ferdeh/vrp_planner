@@ -1,4 +1,4 @@
-# vrp_dispatch_optimizer
+# VRP Planner
 
 MVP full stack untuk optimisasi dispatch distribusi BBM dari depot ke SPBU. Aplikasi ini menghitung kebutuhan truck minimum, komposisi tipe truck yang optimal, assignment order ke truck, urutan rute, total biaya, dan daftar order yang tidak terlayani bila infeasible.
 
@@ -55,82 +55,81 @@ Alur utama:
 ## 5. Struktur project
 
 ```text
-vrp_dispatch_optimizer/
+vrp_planner/
   backend/
   frontend/
   docker-compose.yml
   README.md
 ```
 
-## 6. Setup lokal
+## 6. Runtime model
 
-### Backend
+Repository ini sekarang diposisikan sebagai source-code repo. Jalur runtime lokal yang direkomendasikan adalah:
+
+- source code tetap di `vrp_planner`
+- frontend, backend, dan database planner dijalankan oleh `vrp_infa`
+- browser mengakses planner hanya lewat `http://planner.localhost:8088`
+- auth tetap dimiliki oleh Traefik + OAuth2 Proxy + Keycloak
+- komunikasi internal memakai Docker service name seperti `planner-backend`, `planner-db`, `truck-backend`, dan `spbu-backend`
+
+Ini menghilangkan dual runtime antara app standalone dan app terintegrasi.
+
+## 7. Setup lokal terintegrasi
+
+Jalankan semua runtime planner dari repo `vrp_infa`, bukan dari repo ini.
+
+Contoh dari root `vrp_infa`:
 
 ```bash
-cd backend
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-alembic upgrade head
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8080
+docker compose --env-file .env -f docker-compose.local.yml build planner-db planner-backend planner-frontend portal
+docker compose --env-file .env -f docker-compose.local.yml up -d planner-db planner-backend planner-frontend oauth2-proxy-planner portal
 ```
 
-Konfigurasi PostgreSQL existing di host machine:
+Target URL lokal:
 
-- Host: `localhost:5432`
-- Database: `vrp_planner`
-- User: `vrp_user`
-- Password: `change_me`
+- portal: [http://portal.localhost:8088](http://portal.localhost:8088)
+- planner: [http://planner.localhost:8088](http://planner.localhost:8088)
+- auth: [http://auth.localhost:8088](http://auth.localhost:8088)
 
-Untuk backend yang berjalan langsung di host, gunakan:
+Environment runtime planner sekarang disuplai dari `vrp_infa`:
 
 ```env
-DATABASE_URL=postgresql+psycopg2://vrp_user:change_me@localhost:5432/vrp_planner
+DATABASE_URL=postgresql+psycopg2://planner:<password>@planner-db:5432/vrp_planner
+MASTER_DATA_API_BASE_URL=http://spbu-backend:8000
+TRUCK_MASTER_DATA_API_BASE_URL=http://truck-backend:8000
+PLANNER_PUBLIC_BASE_URL=http://planner.localhost:8088
+PLANNER_AUTH_LOGOUT_URL=http://auth.localhost:8088/realms/vrp-platform/protocol/openid-connect/logout
+PLANNER_OAUTH_CLIENT_ID=oauth2-proxy-planner
 ```
 
-### Frontend
+Frontend tidak lagi diarahkan ke `localhost:8080`. Dalam mode terintegrasi, browser memakai same-origin `/api/...` dan Nginx planner meneruskan request itu ke `planner-backend`.
+
+Perilaku frontend container pada mode ini:
+
+- `VITE_API_BASE_URL` sengaja dibiarkan kosong agar browser tetap memakai origin planner yang sama
+- Nginx planner melakukan reverse proxy `location /api/` ke `PLANNER_API_UPSTREAM`
+- endpoint `GET /portal` di frontend dipakai sebagai shortcut kembali ke portal host platform
+- tombol `Logout` di UI memanggil backend planner untuk meminta handoff logout ke OAuth2 Proxy dan Keycloak
+
+## 8. Secondary standalone mode
+
+Repo ini masih menyimpan `docker-compose.yml` sebagai mode sekunder untuk smoke test terisolasi, tetapi bukan jalur kerja utama. Semua service di file itu sekarang berada di profile `standalone`, tidak mem-publish port host, dan tetap memakai internal service name:
+
+- `planner-frontend`
+- `planner-backend`
+- `planner-db`
+
+Jika memang perlu menggunakannya untuk debugging isolated build:
 
 ```bash
-cd frontend
-npm install
-cp .env.example .env
-npm run dev
+docker compose --profile standalone up --build
 ```
 
-## 7. Setup Docker
+Karena service tidak mem-publish port host, mode ini lebih cocok untuk smoke test di network Docker yang sama atau untuk dihubungkan ke reverse proxy lain, bukan untuk akses browser host secara langsung.
 
-Semua service dapat dijalankan dengan:
+Jangan gunakan mode ini sebagai baseline akses browser harian. Untuk integrasi platform, selalu gunakan host `planner.localhost:8088` melalui `vrp_infa`.
 
-```bash
-cp .env.example .env
-docker-compose up --build
-```
-
-Default `docker-compose` pada project ini memakai PostgreSQL existing di host machine, jadi backend container diarahkan ke:
-
-```env
-DATABASE_URL=postgresql+psycopg2://vrp_user:change_me@host.docker.internal:5432/vrp_planner
-```
-
-Karena backend berjalan di dalam container, `localhost` tidak boleh dipakai untuk koneksi ke database host. Gunakan `host.docker.internal`.
-
-Jika ingin tetap menyalakan PostgreSQL container lokal terpisah, jalankan profile `local-db`:
-
-```bash
-docker-compose --profile local-db up --build
-```
-
-Secara default profile ini memetakan PostgreSQL container ke port host `5433` agar tidak bentrok dengan PostgreSQL existing di `localhost:5432`.
-
-Service yang tersedia:
-
-- frontend: [http://localhost:3000](http://localhost:3000)
-- backend: [http://localhost:8080](http://localhost:8080)
-- postgres existing host: `localhost:5432`
-- postgres container opsional: `localhost:5433`
-
-## 8. Migration
+## 9. Migration
 
 Menjalankan migration manual:
 
@@ -146,34 +145,12 @@ cd backend
 alembic revision --autogenerate -m "your message"
 ```
 
-## 9. Menjalankan backend dan frontend tanpa Docker
-
-```bash
-# Terminal 1
-cd backend
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8080
-
-# Terminal 2
-cd frontend
-npm run dev -- --host 0.0.0.0 --port 3000
-```
-
-Untuk akses dari device lain di jaringan lokal, buka frontend lewat IP host misalnya
-`http://192.168.100.219:3000`. Frontend akan otomatis mencoba backend di host yang sama
-dengan port `8080`, sehingga backend perlu tetap dijalankan dengan `--host 0.0.0.0`.
-
-Jika butuh memaksa alamat backend tertentu, set `VITE_API_BASE_URL`, misalnya:
-
-```bash
-VITE_API_BASE_URL=http://192.168.100.219:8080 npm run dev -- --host 0.0.0.0 --port 3000
-```
-
 ## 10. Integrasi external API
 
 Default base URL backend:
 
-- non-Docker/local external app: `http://localhost:8000`
-- default containerized integration: `http://host.docker.internal:8000`
+- SPBU master data: `http://spbu-backend:8000`
+- Truck master data: `http://truck-backend:8000`
 
 Path yang dikonsumsi backend:
 
@@ -550,6 +527,17 @@ Aturan antrean depot yang dipakai saat ini:
 
 ## 16. API utama
 
+### Auth
+
+- `GET /api/v1/auth/logout-url`
+- `GET /api/v1/auth/logout-redirect`
+
+Catatan:
+
+- endpoint auth ini dipakai untuk phase-1 SSO handoff, bukan untuk login lokal planner
+- request membutuhkan header `Authorization: Bearer <upstream identity token>` dari proxy auth di depan planner
+- `logout-url` mengembalikan URL sign-out OAuth2 Proxy, sedangkan `logout-redirect` langsung melakukan redirect 302 ke flow logout tersebut
+
 ### Health
 
 - `GET /health`
@@ -780,7 +768,7 @@ Cakupan test yang tersedia:
 
 ## 21. Asumsi implementasi penting
 
-- tidak ada auth pada MVP
+- phase-1 SSO tetap dimiliki layer platform upstream seperti Traefik, OAuth2 Proxy, dan Keycloak; planner saat ini hanya menyediakan handoff logout
 - payload disimpan sebagai snapshot scenario untuk audit ringan
 - hasil `total_cost` menggabungkan biaya fixed, variable, dan penalty yang terealisasi
 - truck dari master data dapat membawa daftar `compartments`; `capacity_kl` truck adalah total seluruh compartment

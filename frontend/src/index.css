@@ -5,9 +5,9 @@
 :root {
   color: #15385b;
   background:
-    radial-gradient(circle at left top, rgba(184, 210, 17, 0.16), transparent 24%),
-    radial-gradient(circle at right top, rgba(11, 115, 191, 0.10), transparent 28%),
-    linear-gradient(180deg, #f9fbfb 0%, #f2f7fa 46%, #fbfcfd 100%);
+    radial-gradient(circle at left top, rgba(178, 207, 0, 0.08), transparent 22%),
+    radial-gradient(circle at right top, rgba(10, 114, 187, 0.06), transparent 26%),
+    linear-gradient(180deg, #fbfaf8 0%, #f6f4f0 48%, #fbfaf8 100%);
 }
 
 body {
@@ -17,9 +17,9 @@ body {
   font-family: theme("fontFamily.body");
   color: #15385b;
   background:
-    radial-gradient(circle at left top, rgba(184, 210, 17, 0.16), transparent 24%),
-    radial-gradient(circle at right top, rgba(11, 115, 191, 0.10), transparent 28%),
-    linear-gradient(180deg, #f9fbfb 0%, #f2f7fa 46%, #fbfcfd 100%);
+    radial-gradient(circle at left top, rgba(178, 207, 0, 0.08), transparent 22%),
+    radial-gradient(circle at right top, rgba(10, 114, 187, 0.06), transparent 26%),
+    linear-gradient(180deg, #fbfaf8 0%, #f6f4f0 48%, #fbfaf8 100%);
 }
 
 a {
@@ -37,6 +37,7 @@ a {
 
 .panel {
   @apply rounded-[28px] border border-slate-200/80 bg-white shadow-card backdrop-blur-md;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.97) 0%, rgba(249, 248, 245, 0.94) 100%);
 }
 
 .panel-header {
@@ -96,6 +97,42 @@ input[type="time"].input {
 
 .table-shell {
   @apply overflow-x-auto rounded-[28px] border border-slate-200/80 bg-white/90 shadow-sm;
+}
+
+.planner-shell {
+  position: relative;
+}
+
+.planner-shell::before,
+.planner-shell::after {
+  content: "";
+  position: fixed;
+  pointer-events: none;
+  border-radius: 999px;
+  z-index: 0;
+}
+
+.planner-shell::before {
+  top: -220px;
+  left: -140px;
+  width: 520px;
+  height: 520px;
+  border: 48px solid rgba(228, 226, 222, 0.28);
+}
+
+.planner-shell::after {
+  top: -240px;
+  right: -130px;
+  width: 580px;
+  height: 580px;
+  border: 56px solid rgba(231, 229, 225, 0.3);
+}
+
+@media (max-width: 768px) {
+  .planner-shell::before,
+  .planner-shell::after {
+    display: none;
+  }
 }
 
 table {
