@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+
 from app.models import schemas
 from app.services.scenario_analysis_service import _ExperimentRun, ScenarioAnalysisService
 
@@ -34,6 +36,8 @@ def test_optimize_endpoint_and_scenario_detail(client, sample_payload):
     assert list_response.status_code == 200
     assert len(list_response.json()["items"]) == 1
     assert list_response.json()["items"][0]["status"] in {"feasible", "partial"}
+    assert "total_demand" in list_response.json()["items"][0]
+    assert "total_delivered_demand" in list_response.json()["items"][0]
 
     detail_response = client.get(f"/api/v1/scenarios/{body['scenario_id']}")
     assert detail_response.status_code == 200
@@ -168,3 +172,43 @@ def test_level_two_analysis_reports_experiment_costs(client, sample_payload, mon
     assert all(item["solver_status"] != "EXPERIMENT_ERROR" for item in experiment_results)
     assert all("total_cost" in item for item in experiment_results)
     assert all(item["total_cost"] >= 0 for item in experiment_results)
+
+
+def test_level_one_analysis_explains_preprocessing_failure(client, sample_payload):
+    payload = deepcopy(sample_payload)
+    for order in payload["orders"]:
+        order["spbu_id"] = "SPBU001"
+    for truck in payload["available_trucks"]:
+        truck["truck_category"] = 4
+
+    optimize_response = client.post("/api/v1/optimize", json=payload)
+    assert optimize_response.status_code == 202
+    scenario_id = optimize_response.json()["scenario_id"]
+
+    detail_response = client.get(f"/api/v1/scenarios/{scenario_id}")
+    assert detail_response.status_code == 200
+    detail = detail_response.json()
+    assert detail["status"] == "preprocessing_failed"
+    assert detail["total_delivered_demand"] == 0
+    assert detail["message"] == "No feasible shipments remained after preprocessing."
+
+    create_response = client.post(
+        f"/api/v1/scenarios/{scenario_id}/analysis",
+        json={"level": "level_1"},
+    )
+    assert create_response.status_code == 202
+    analysis_id = create_response.json()["analysis_id"]
+
+    analysis_response = client.get(
+        f"/api/v1/scenarios/{scenario_id}/analysis/{analysis_id}"
+    )
+    assert analysis_response.status_code == 200
+    analysis = analysis_response.json()
+    assert analysis["report"]["root_cause_summary"].startswith(
+        "Scenario gagal di preprocessing sehingga seluruh order ditandai unserved"
+    )
+    assert "Status preprocessing failed" in analysis["report"]["solver_status_explained"]
+    assert any(
+        "No truck matches SPBU truck category policy." in item
+        for item in analysis["report"]["key_findings"]
+    )

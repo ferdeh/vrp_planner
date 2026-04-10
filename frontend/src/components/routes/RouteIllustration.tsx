@@ -51,10 +51,28 @@ function minutesToHhmm(value: number) {
   return `${hours}:${minutes}`;
 }
 
+function normalizeTimelineMinutes(rawMinutes: number | null, floorMinutes: number | null) {
+  if (rawMinutes === null) {
+    return null;
+  }
+
+  if (floorMinutes === null) {
+    return rawMinutes;
+  }
+
+  let normalized = rawMinutes;
+  while (normalized < floorMinutes) {
+    normalized += 1440;
+  }
+  return normalized;
+}
+
 function buildTimelineLegs(route: RouteDetailResponse): TimelineLeg[] {
   const legs: TimelineLeg[] = [];
   const originServiceStartMinutes = hhmmToMinutes(route.origin_service_start);
-  const originEtdMinutes = hhmmToMinutes(route.origin_etd);
+  const originEtdBaseMinutes = hhmmToMinutes(route.origin_etd);
+  const originEtdMinutes = normalizeTimelineMinutes(originEtdBaseMinutes, originServiceStartMinutes);
+  let lastTimelineMinutes = originEtdMinutes ?? originServiceStartMinutes;
 
   if (
     route.depot_service_time_minutes > 0 &&
@@ -80,9 +98,12 @@ function buildTimelineLegs(route: RouteDetailResponse): TimelineLeg[] {
   route.stops.forEach((stop, index) => {
     const previousStop = index > 0 ? route.stops[index - 1] : null;
     const isDepotWait = stop.stop_kind === "depot_wait";
-    const startMinutes = hhmmToMinutes(isDepotWait ? stop.eta : previousStop?.etd || route.origin_etd);
-    const etaMinutes = hhmmToMinutes(isDepotWait ? stop.etd : stop.eta);
-    const etdMinutes = hhmmToMinutes(stop.etd);
+    const startBaseMinutes = hhmmToMinutes(isDepotWait ? stop.eta : previousStop?.etd || route.origin_etd);
+    const startMinutes = normalizeTimelineMinutes(startBaseMinutes, lastTimelineMinutes);
+    const etaBaseMinutes = hhmmToMinutes(isDepotWait ? stop.etd : stop.eta);
+    const etaMinutes = normalizeTimelineMinutes(etaBaseMinutes, startMinutes);
+    const etdBaseMinutes = hhmmToMinutes(stop.etd);
+    const etdMinutes = normalizeTimelineMinutes(etdBaseMinutes, etaMinutes);
 
     if (startMinutes === null || etaMinutes === null) {
       return;
@@ -107,12 +128,18 @@ function buildTimelineLegs(route: RouteDetailResponse): TimelineLeg[] {
       etaMinutes,
       etdMinutes,
     });
+
+    lastTimelineMinutes = etdMinutes ?? etaMinutes;
   });
 
   if (route.stops.length > 0) {
     const lastStop = route.stops[route.stops.length - 1];
-    const startMinutes = hhmmToMinutes(lastStop.etd);
-    const etaMinutes = hhmmToMinutes(route.return_eta);
+    const startBaseMinutes = hhmmToMinutes(lastStop.etd);
+    const startMinutes = normalizeTimelineMinutes(startBaseMinutes, lastTimelineMinutes);
+    const etaMinutes =
+      route.return_travel_time_minutes !== null && route.return_travel_time_minutes !== undefined
+        ? (startMinutes !== null ? startMinutes + route.return_travel_time_minutes : null)
+        : normalizeTimelineMinutes(hhmmToMinutes(route.return_eta), startMinutes);
 
     if (startMinutes !== null && etaMinutes !== null) {
       legs.push({
@@ -129,6 +156,8 @@ function buildTimelineLegs(route: RouteDetailResponse): TimelineLeg[] {
         etaMinutes,
         etdMinutes: null,
       });
+
+      lastTimelineMinutes = etaMinutes;
     }
   }
 

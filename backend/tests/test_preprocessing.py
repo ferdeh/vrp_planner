@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import pytest
+
 from app.models import schemas
 from app.services import master_data_client as master_data_module
 from app.services.preprocessing_service import PreprocessingService
+from app.services.network_client import NetworkDataError
 
 
 def test_preprocessing_splits_large_order(configured_modules, sample_payload):
@@ -176,3 +179,24 @@ def test_preprocessing_carries_priority_eta_to_shipments(configured_modules, sam
     assert len(ord001_shipments) == 3
     assert all(item.priority is True for item in ord001_shipments)
     assert all(item.priority_eta_minutes == 570 for item in ord001_shipments)
+
+
+def test_preprocessing_fails_when_distance_matrix_is_unavailable_from_network_master_data(
+    configured_modules, sample_payload
+):
+    payload = schemas.OptimizationRequest.model_validate(sample_payload)
+
+    class _StubNetworkClient:
+        def get_time_matrix(self, depot_id: str, spbu_ids: list[str]) -> schemas.MatrixResponse:
+            return schemas.MatrixResponse(nodes=["DEPOT", *spbu_ids], matrix=[[0, 10, 20], [10, 0, 5], [20, 5, 0]])
+
+        def get_distance_matrix(self, _depot_id: str, _spbu_ids: list[str]) -> schemas.MatrixResponse:
+            raise NetworkDataError("No graph path found in SPBU network master data between DPT001 and SPBU002.")
+
+    service = PreprocessingService(network_client=_StubNetworkClient())
+
+    with pytest.raises(
+        ValueError,
+        match="Distance matrix from SPBU network master data is unavailable for depot DPT001",
+    ):
+        service.preprocess(payload, payload.optimization_config)

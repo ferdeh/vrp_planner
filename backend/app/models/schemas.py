@@ -9,7 +9,15 @@ from uuid import UUID
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-SolutionStatus = Literal["processing", "feasible", "infeasible", "partial", "timeout", "error"]
+SolutionStatus = Literal[
+    "processing",
+    "feasible",
+    "infeasible",
+    "partial",
+    "preprocessing_failed",
+    "timeout",
+    "error",
+]
 AnalysisLevel = Literal["level_1", "level_2"]
 AnalysisStatus = Literal["processing", "completed", "error"]
 SUPPORTED_PRODUCT_TYPES = [
@@ -22,7 +30,6 @@ SUPPORTED_PRODUCT_TYPES = [
     "PERTAMINA_DEX",
 ]
 SUPPORTED_OBJECTIVE_KEYS = [
-    "minimize_unserved_orders",
     "minimize_truck_count",
     "minimize_distance",
     "minimize_time",
@@ -200,7 +207,6 @@ class SolverOptions(BaseModel):
 
 
 class OptimizationConfig(BaseModel):
-    minimize_unserved_orders: bool = True
     minimize_truck_count: bool = True
     minimize_distance: bool = True
     minimize_time: bool = True
@@ -379,6 +385,8 @@ class ScenarioListItem(BaseModel):
     dispatch_date: date
     depot_id: str
     status: SolutionStatus
+    total_demand: float
+    total_delivered_demand: float
     active_truck_count: int
     total_cost: float
     total_distance: float

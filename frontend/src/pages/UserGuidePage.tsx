@@ -32,21 +32,17 @@ const quickSteps = [
 
 const objectives = [
   {
-    title: "Minimize unserved orders",
-    description:
-      "Menjadikan jumlah order yang drop atau tidak terlayani sebagai prioritas paling atas. Ini adalah objective yang paling direkomendasikan untuk operasi harian.",
-  },
-  {
     title: "Minimize truck count",
-    description: "Mengurangi jumlah truck aktif yang harus keluar depot.",
+    description:
+      "Mengurangi jumlah truck aktif yang harus keluar depot setelah solver menemukan coverage order terbaik yang bisa dicapai.",
   },
   {
     title: "Minimize distance",
-    description: "Mengurangi total km perjalanan seluruh truck.",
+    description: "Mengurangi total km perjalanan seluruh truck setelah tahap full-service atau repair selesai.",
   },
   {
     title: "Minimize truck time",
-    description: "Mengurangi total waktu perjalanan truck di jalan.",
+    description: "Mengurangi total waktu perjalanan truck di jalan setelah coverage order terbaik ditemukan.",
   },
   {
     title: "Minimize depot operation time",
@@ -98,7 +94,7 @@ const parameterNotes = [
   "Field `time_window_start` dan `time_window_end` pada order tetap disimpan di request snapshot, tetapi bukan sumber constraint solver.",
   "Soft `Time window SPBU` tidak memerlukan input value tambahan. Sistem langsung memakai TW master data dan menghitung penalty bila terlambat.",
   "Order priority tetap wajib dilayani saat `SPBU Priority` aktif sebagai hard maupun soft. Priority baru boleh ikut `Allow unserved` bila `SPBU Priority` tidak aktif.",
-  "Solver tidak lagi langsung mencampur semua objective sekaligus. Sistem sekarang mencari service level terbaik dulu, lalu baru memperbaiki overtime, lateness, dan objective biaya.",
+  "Solver tidak lagi langsung mencampur semua objective sekaligus. Sistem sekarang mencoba strict full-service lebih dulu, lalu baru mengoptimalkan objective biaya dan efisiensi.",
 ];
 
 const hardConstraints = [
@@ -143,7 +139,7 @@ const hardConstraints = [
 const softConstraints = [
   {
     title: "Allow unserved",
-    description: "Shipment boleh tidak terlayani dengan penalty. Order priority hanya boleh ikut rule ini bila SPBU Priority tidak aktif sebagai hard maupun soft.",
+    description: "Shipment boleh tidak terlayani dengan penalty hanya sebagai fallback. Solver tetap mencoba full-service lebih dulu. Order priority hanya boleh ikut rule ini bila SPBU Priority tidak aktif sebagai hard maupun soft.",
   },
   {
     title: "Time window SPBU",
@@ -216,27 +212,27 @@ const routeMapNotes = [
 
 const solverStages = [
   {
-    title: "Stage 1, service level",
-    description: "Solver mencari solusi dengan jumlah order unserved seminimal mungkin lebih dulu.",
+    title: "Stage 1, strict full-service",
+    description: "Solver terlebih dahulu mencoba solusi yang melayani semua shipment dengan `Allow unserved` dimatikan secara internal.",
   },
   {
-    title: "Stage 2, repair unserved",
-    description: "Jika hasil masih partial, solver menjalankan repair pass untuk mencoba memasukkan order yang masih drop ke route yang masih punya waktu kerja.",
+    title: "Stage 2, seeded full-service optimization",
+    description: "Jika full-service ditemukan, solusi itu dipakai sebagai seed untuk mengoptimalkan truck count, distance, time, dan depot operation time tanpa boleh drop order.",
   },
   {
-    title: "Stage 3, lateness dan overtime",
-    description: "Setelah service level terbaik ditemukan, solver memperbaiki penalty ETA priority, time window soft, dan overtime.",
+    title: "Stage 3, best-effort partial fallback",
+    description: "Jika strict full-service gagal dan `Allow unserved` aktif, solver turun ke mode partial dengan penalty unserved sangat besar.",
   },
   {
-    title: "Stage 4, objective biaya dan efisiensi",
-    description: "Baru setelah itu solver mengoptimalkan truck count, time, distance, dan depot operation time sesuai urutan objective user.",
+    title: "Stage 4, repair dan residual cleanup",
+    description: "Dari solusi partial yang sudah ada, solver mencoba targeted cleanup, forced residual insertion, dan repair tambahan untuk menutup order sisa sebelum menerima partial akhir.",
   },
 ];
 
 const fallbackNotes = [
-  "Jika `Allow unserved` aktif, solver tetap berusaha mengecilkan unserved terlebih dahulu sebelum mengejar efisiensi biaya.",
-  "Jika `Allow unserved` nonaktif dan full-feasible solve timeout, sistem otomatis menjalankan best-effort fallback internal untuk mencari partial solution terbaik.",
-  "Best-effort fallback dipakai agar user tidak hanya menerima timeout kosong saat sebenarnya sistem masih bisa memberi rute operasional terbaik.",
+  "Objective `Minimize unserved orders` sudah tidak dipakai lagi. Coverage order sekarang ditentukan oleh pipeline solver, bukan toggle objective terpisah.",
+  "Jika `Allow unserved` aktif, solver tetap mencoba strict full-service terlebih dahulu. Partial fallback baru dipakai jika tahap itu gagal.",
+  "Jika `Allow unserved` nonaktif dan strict full-service gagal atau timeout, backend tidak turun ke partial fallback.",
 ];
 
 const scenarioAnalysisLevels = [
@@ -339,8 +335,8 @@ export function UserGuidePage() {
         <div className="rounded-[24px] border border-sky-200 bg-sky-50/80 p-5">
           <h3 className="text-base font-semibold text-sky-950">Catatan prioritas objective</h3>
           <p className="mt-2 text-sm leading-6 text-sky-900">
-            Walaupun urutan objective tetap dibaca dari atas ke bawah, solver sekarang selalu mencari service level
-            terbaik lebih dulu agar order tidak terlalu cepat di-drop hanya karena objective efisiensi lain.
+            Walaupun urutan objective tetap dibaca dari atas ke bawah, solver sekarang selalu mencoba full-service
+            lebih dulu. Objective biaya dan efisiensi baru dioptimalkan setelah coverage terbaik ditemukan.
           </p>
         </div>
       </GuideSection>
@@ -348,7 +344,7 @@ export function UserGuidePage() {
       <GuideSection
         eyebrow="Solver Flow"
         title="Cara Solver Bekerja"
-        description="Backend sekarang memakai multi-stage solve agar perilaku lebih dekat ke operasi nyata. Solver tidak langsung mengejar route yang murah, tetapi lebih dulu mencoba mengirim order sebanyak mungkin."
+        description="Backend sekarang memakai multi-stage solve agar perilaku lebih dekat ke operasi nyata. Solver tidak langsung mengejar route yang murah, tetapi lebih dulu mencoba memenuhi seluruh order."
       >
         <div className="grid gap-4 lg:grid-cols-2">
           {solverStages.map((item) => (

@@ -82,7 +82,9 @@ class OptimizationService:
                 )
                 result = schemas.OptimizationResultResponse(
                     scenario_id=scenario.id,
-                    status="infeasible" if not merged_config.soft_constraints.allow_unserved_orders else "partial",
+                    status="infeasible"
+                    if not merged_config.soft_constraints.allow_unserved_orders
+                    else "preprocessing_failed",
                     message=solver_output.message,
                     total_orders=len(payload.orders),
                     total_demand=problem.total_demand,

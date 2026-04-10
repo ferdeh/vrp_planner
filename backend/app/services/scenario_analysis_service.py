@@ -190,6 +190,8 @@ class ScenarioAnalysisService:
     def _build_level_one_report(self, scenario) -> schemas.ScenarioAnalysisReport:
         payload, config = self._load_snapshot(scenario)
         time_by_spbu = self._fetch_time_by_spbu(payload)
+        preprocessing_failure = self._is_preprocessing_failure(scenario)
+        dominant_unserved_reason = self._dominant_unserved_reason(scenario)
         problematic_orders = self._rank_problematic_orders(
             payload=payload,
             config=config,
@@ -213,9 +215,17 @@ class ScenarioAnalysisService:
             key_findings.append(
                 "Solver tidak menghasilkan assignment sama sekali, sehingga seluruh order tampil sebagai unserved pada hasil base scenario."
             )
+        elif preprocessing_failure:
+            key_findings.append(
+                "Tidak ada shipment yang lolos preprocessing, sehingga solver OR-Tools tidak sempat mencoba assignment apa pun."
+            )
         elif scenario.result.total_unserved_orders:
             key_findings.append(
                 f"Hasil existing scenario masih menyisakan {scenario.result.total_unserved_orders} order unserved."
+            )
+        if preprocessing_failure and dominant_unserved_reason:
+            key_findings.append(
+                f"Alasan preassigned unserved yang dominan: {dominant_unserved_reason}"
             )
 
         root_cause_summary = self._infer_level_one_root_cause(
@@ -223,12 +233,21 @@ class ScenarioAnalysisService:
             config=config,
             priority_count=len(priority_orders),
             problematic_orders=problematic_orders,
+            preprocessing_failure=preprocessing_failure,
+            dominant_unserved_reason=dominant_unserved_reason,
         )
-        solver_status_explained = self._explain_solver_status(scenario.result.status, config)
+        solver_status_explained = self._explain_solver_status(
+            scenario.result.status,
+            config,
+            preprocessing_failure=preprocessing_failure,
+            dominant_unserved_reason=dominant_unserved_reason,
+        )
         recommended_actions = self._recommend_actions(
             scenario_status=scenario.result.status,
             config=config,
             experiment_runs=[],
+            preprocessing_failure=preprocessing_failure,
+            dominant_unserved_reason=dominant_unserved_reason,
         )
         return schemas.ScenarioAnalysisReport(
             root_cause_summary=root_cause_summary,
@@ -243,6 +262,8 @@ class ScenarioAnalysisService:
         payload, config = self._load_snapshot(scenario)
         level_one = self._build_level_one_report(scenario)
         experiment_runs: list[_ExperimentRun] = []
+        preprocessing_failure = self._is_preprocessing_failure(scenario)
+        dominant_unserved_reason = self._dominant_unserved_reason(scenario)
 
         extended_timeout_seconds = min(max(config.solver_options.max_solver_seconds * 2, 90), 120)
         extended_timeout_config = config.model_copy(
@@ -336,13 +357,22 @@ class ScenarioAnalysisService:
                 scenario_status=scenario.result.status,
                 config=config,
                 experiment_results=experiment_map,
+                preprocessing_failure=preprocessing_failure,
+                dominant_unserved_reason=dominant_unserved_reason,
             ),
-            solver_status_explained=self._explain_solver_status(scenario.result.status, config),
+            solver_status_explained=self._explain_solver_status(
+                scenario.result.status,
+                config,
+                preprocessing_failure=preprocessing_failure,
+                dominant_unserved_reason=dominant_unserved_reason,
+            ),
             key_findings=key_findings,
             recommended_actions=self._recommend_actions(
                 scenario_status=scenario.result.status,
                 config=config,
                 experiment_runs=experiment_runs,
+                preprocessing_failure=preprocessing_failure,
+                dominant_unserved_reason=dominant_unserved_reason,
             ),
             problematic_orders=problematic_orders,
             experiment_results=[item.summary for item in experiment_runs],
@@ -354,6 +384,9 @@ class ScenarioAnalysisService:
         config: schemas.OptimizationConfig,
         priority_count: int,
         problematic_orders: list[schemas.ScenarioAnalysisProblematicOrder],
+        *,
+        preprocessing_failure: bool = False,
+        dominant_unserved_reason: str | None = None,
     ) -> str:
         if scenario_status == "timeout":
             if config.soft_constraints.priority_eta and priority_count:
@@ -368,7 +401,26 @@ class ScenarioAnalysisService:
             return "Solver berhenti di batas waktu sebelum menemukan assignment feasible."
         if scenario_status == "infeasible":
             return "Kombinasi hard constraint pada scenario ini tidak memiliki solusi feasible menurut solver."
+        if scenario_status == "preprocessing_failed" or preprocessing_failure:
+            if dominant_unserved_reason:
+                return (
+                    "Scenario gagal di preprocessing sehingga seluruh order ditandai unserved "
+                    f"sebelum solver berjalan. Penyebab dominannya: {dominant_unserved_reason}"
+                )
+            return (
+                "Scenario gagal di preprocessing sehingga tidak ada shipment feasible yang bisa diberikan ke solver."
+            )
         if scenario_status == "partial":
+            if preprocessing_failure:
+                if dominant_unserved_reason:
+                    return (
+                        "Scenario lama ini efektif gagal di preprocessing karena seluruh order sudah ditandai unserved "
+                        f"sebelum solver berjalan. Penyebab dominannya: {dominant_unserved_reason}"
+                    )
+                return (
+                    "Scenario lama ini efektif gagal di preprocessing karena seluruh order sudah ditandai unserved "
+                    "sehingga tidak ada shipment feasible yang bisa diberikan ke solver."
+                )
             return "Scenario masih feasible, tetapi ada subset order yang secara biaya atau constraint lebih sulit untuk dilayani."
         if problematic_orders:
             return "Scenario feasible, namun ada order yang secara heuristik paling menekan kapasitas search dan layout rute."
@@ -379,6 +431,9 @@ class ScenarioAnalysisService:
         scenario_status: schemas.SolutionStatus,
         config: schemas.OptimizationConfig,
         experiment_results: dict[str, _ExperimentRun],
+        *,
+        preprocessing_failure: bool = False,
+        dominant_unserved_reason: str | None = None,
     ) -> str:
         extended = experiment_results.get("extended_timeout")
         priority_only = experiment_results.get("priority_only")
@@ -413,12 +468,17 @@ class ScenarioAnalysisService:
             config=config,
             priority_count=0,
             problematic_orders=[],
+            preprocessing_failure=preprocessing_failure,
+            dominant_unserved_reason=dominant_unserved_reason,
         )
 
     def _explain_solver_status(
         self,
         scenario_status: schemas.SolutionStatus,
         config: schemas.OptimizationConfig,
+        *,
+        preprocessing_failure: bool = False,
+        dominant_unserved_reason: str | None = None,
     ) -> str:
         if scenario_status == "timeout":
             return (
@@ -427,7 +487,29 @@ class ScenarioAnalysisService:
             )
         if scenario_status == "infeasible":
             return "Solver mengembalikan infeasible, artinya kombinasi hard constraint tidak dapat dipenuhi pada model yang dibangun."
+        if scenario_status == "preprocessing_failed" or preprocessing_failure:
+            if dominant_unserved_reason:
+                return (
+                    "Status preprocessing failed berarti solver belum sempat membangun assignment karena "
+                    "seluruh order gugur di preprocessing. "
+                    f"Alasan dominannya: {dominant_unserved_reason}"
+                )
+            return (
+                "Status preprocessing failed berarti solver belum sempat membangun assignment karena "
+                "seluruh order gugur di preprocessing."
+            )
         if scenario_status == "partial":
+            if preprocessing_failure:
+                if dominant_unserved_reason:
+                    return (
+                        "Status partial pada scenario lama ini sebenarnya menunjukkan kegagalan preprocessing, "
+                        "bukan partial route dari solver. "
+                        f"Alasan dominannya: {dominant_unserved_reason}"
+                    )
+                return (
+                    "Status partial pada scenario lama ini sebenarnya menunjukkan kegagalan preprocessing, "
+                    "bukan partial route dari solver."
+                )
             return "Solver menemukan solusi, tetapi sebagian order tetap unserved atau dijatuhkan sesuai konfigurasi penalty."
         if scenario_status == "feasible":
             return "Solver menemukan solusi yang melayani seluruh order sesuai aturan aktif."
@@ -471,9 +553,20 @@ class ScenarioAnalysisService:
         scenario_status: schemas.SolutionStatus,
         config: schemas.OptimizationConfig,
         experiment_runs: list[_ExperimentRun],
+        *,
+        preprocessing_failure: bool = False,
+        dominant_unserved_reason: str | None = None,
     ) -> list[str]:
         recommendations: list[str] = []
         experiment_map = {item.summary.experiment_id: item for item in experiment_runs}
+        if preprocessing_failure:
+            if dominant_unserved_reason == "No truck matches SPBU truck category policy.":
+                recommendations.append(
+                    "Samakan kategori armada dengan batas truck category SPBU, atau nonaktifkan hard truck category bila aturan akses memang boleh dilonggarkan."
+                )
+            recommendations.append(
+                "Periksa preprocessing notes dan alasan unserved per order, karena bottleneck terjadi sebelum solver OR-Tools mulai search."
+            )
         if scenario_status == "timeout":
             recommendations.append(
                 f"Pertimbangkan menaikkan timeout solver di atas {config.solver_options.max_solver_seconds} detik untuk scenario dengan cluster priority padat."
@@ -499,6 +592,30 @@ class ScenarioAnalysisService:
         if not recommendations:
             recommendations.append("Gunakan level 2 analysis untuk eksperimen diagnosis yang lebih kuat.")
         return recommendations
+
+    def _is_preprocessing_failure(self, scenario) -> bool:
+        result = scenario.result
+        if result is None or result.status not in {"partial", "preprocessing_failed"}:
+            return False
+        if result.total_delivered_demand != 0 or result.active_truck_count != 0:
+            return False
+        if "No feasible shipments remained after preprocessing." in (result.message or ""):
+            return True
+        preprocessing_codes = {
+            item.get("code")
+            for item in (result.preprocessing_notes or [])
+            if isinstance(item, dict)
+        }
+        return "NO_FEASIBLE_SHIPMENTS" in preprocessing_codes
+
+    def _dominant_unserved_reason(self, scenario) -> str | None:
+        result = scenario.result
+        if result is None or not result.unserved_orders:
+            return None
+        counts = Counter(item.reason for item in result.unserved_orders if item.reason)
+        if not counts:
+            return None
+        return counts.most_common(1)[0][0]
 
     def _rank_problematic_orders(
         self,

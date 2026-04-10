@@ -8,7 +8,7 @@ from ortools.constraint_solver import routing_enums_pb2
 
 from app.models import schemas
 from app.services import master_data_client as master_data_module
-from app.services.preprocessing_service import PreprocessingService
+from app.services.preprocessing_service import PreprocessedProblem, PreprocessingService, RouteNode
 from app.services.result_service import ResultService
 from app.solver.objective import effective_unserved_penalty, objective_priority_scale, transit_cost
 from app.solver import ortools_solver as ortools_solver_module
@@ -318,11 +318,11 @@ def test_solver_keeps_service_level_solution_when_quality_refinement_times_out(
     assert solver_output.assignment is base_assignment
     assert solver_output.built_model is stage_one_model
     assert solver_output.search_status == routing_enums_pb2.RoutingSearchStatus.ROUTING_SUCCESS
-    assert "service-level" in solver_output.message
+    assert "strict full-service" in solver_output.message
     assert quality_model.routing.seed_captured is refinement_seed
     assert quality_model.routing.source_assignment_captured is base_assignment
-    assert full_model.routing.seed_captured is refinement_seed
-    assert full_model.routing.source_assignment_captured is base_assignment
+    assert full_model.routing.seed_captured is None
+    assert full_model.routing.source_assignment_captured is None
 
 
 def test_solver_returns_best_effort_partial_when_strict_full_feasible_times_out(
@@ -330,7 +330,7 @@ def test_solver_returns_best_effort_partial_when_strict_full_feasible_times_out(
     sample_payload,
     monkeypatch,
 ):
-    sample_payload["optimization_config"]["soft_constraints"]["allow_unserved_orders"] = False
+    sample_payload["optimization_config"]["soft_constraints"]["allow_unserved_orders"] = True
     payload = schemas.OptimizationRequest.model_validate(sample_payload)
     problem = PreprocessingService().preprocess(payload, payload.optimization_config)
 
@@ -367,19 +367,22 @@ def test_solver_returns_best_effort_partial_when_strict_full_feasible_times_out(
     )
     prefixes: list[str | None] = []
 
-    def fake_pipeline(self, _problem, *, started, best_effort_prefix=None):
+    def fake_full_service(self, _problem, *, started, total_seconds):
+        prefixes.append(None)
+        return strict_timeout
+
+    def fake_best_effort(self, _problem, *, started, total_seconds, best_effort_prefix=None):
         prefixes.append(best_effort_prefix)
-        if best_effort_prefix is None:
-            return strict_timeout
         return best_effort_result
 
-    monkeypatch.setattr(OrToolsSolver, "_run_multistage_pipeline", fake_pipeline)
+    monkeypatch.setattr(OrToolsSolver, "_run_full_service_pipeline", fake_full_service)
+    monkeypatch.setattr(OrToolsSolver, "_run_best_effort_pipeline", fake_best_effort)
 
     solver_output = OrToolsSolver().solve(problem)
 
     assert solver_output.assignment is best_effort_assignment
     assert solver_output.search_status == routing_enums_pb2.RoutingSearchStatus.ROUTING_SUCCESS
-    assert prefixes == [None, "Full-feasible solve hit the time limit; returning best-effort partial solution."]
+    assert prefixes == [None, "Strict full-service solve failed; returning best-effort partial solution."]
 
 
 def test_result_status_becomes_timeout_when_solver_times_out(configured_modules, sample_payload):
@@ -480,14 +483,12 @@ def test_minimize_depot_operation_time_does_not_add_reload_cost_to_transit_arcs(
 def test_objective_priority_scales_follow_user_order(sample_payload):
     payload = schemas.OptimizationRequest.model_validate(sample_payload)
     config = payload.optimization_config.model_copy(deep=True)
-    config.minimize_unserved_orders = True
     config.minimize_truck_count = True
     config.minimize_distance = True
     config.minimize_time = True
     config.minimize_depot_operation_time = True
     config.objective_priority = [
         "minimize_distance",
-        "minimize_unserved_orders",
         "minimize_time",
         "minimize_truck_count",
         "minimize_depot_operation_time",
@@ -495,13 +496,13 @@ def test_objective_priority_scales_follow_user_order(sample_payload):
 
     assert objective_priority_scale(config, "minimize_distance") > objective_priority_scale(
         config,
-        "minimize_unserved_orders",
-    )
-    assert objective_priority_scale(config, "minimize_unserved_orders") > objective_priority_scale(
-        config,
         "minimize_time",
     )
-    assert effective_unserved_penalty(config) > int(config.penalties.unserved_order_penalty)
+    assert objective_priority_scale(config, "minimize_time") > objective_priority_scale(
+        config,
+        "minimize_truck_count",
+    )
+    assert effective_unserved_penalty(config) == int(config.penalties.unserved_order_penalty)
 
 
 def test_preprocessing_limits_reload_nodes_to_capacity_deficit(configured_modules, sample_payload):
@@ -525,6 +526,711 @@ def test_preprocessing_limits_reload_nodes_to_capacity_deficit(configured_module
     assert problem.total_demand == 32
     assert sum(truck.capacity_kl for truck in problem.trucks) == 24
     assert len(problem.reload_nodes) == 1
+
+
+def test_preprocessing_builds_group_specific_reload_nodes(configured_modules, sample_payload):
+    payload = schemas.OptimizationRequest.model_validate(sample_payload)
+    payload.available_trucks = [
+        payload.available_trucks[0].model_copy(
+            update={
+                "truck_id": "TRK001",
+                "capacity_kl": 8,
+                "compartments": [schemas.TruckCompartment(compartment_id="1", capacity_kl=8)],
+            }
+        ),
+        payload.available_trucks[1].model_copy(
+            update={
+                "truck_id": "TRK002",
+                "capacity_kl": 16,
+                "compartments": [
+                    schemas.TruckCompartment(compartment_id="1", capacity_kl=8),
+                    schemas.TruckCompartment(compartment_id="2", capacity_kl=8),
+                ],
+            }
+        ),
+    ]
+    payload.orders = [
+        schemas.OrderInput(
+            order_id=f"ORD{index:03d}",
+            spbu_id="SPBU001" if index % 2 else "SPBU002",
+            product_type="PERTALITE",
+            demand_kl=8,
+            priority=False,
+            eta=None,
+            service_time_minutes=30,
+            time_window_start="08:00",
+            time_window_end="15:00",
+        )
+        for index in range(1, 6)
+    ]
+
+    problem = PreprocessingService().preprocess(payload, payload.optimization_config)
+    grouped_reload_nodes = {
+        (tuple(node.allowed_vehicle_indices), node.reload_capacity_kl, node.reload_compartment_count)
+        for node in problem.reload_nodes
+    }
+
+    assert ((0,), 8.0, 1) in grouped_reload_nodes
+    assert ((1,), 16.0, 2) in grouped_reload_nodes
+
+
+def test_solver_uses_insertion_seed_when_multi_trip_reload_nodes_exist(configured_modules, sample_payload):
+    payload = schemas.OptimizationRequest.model_validate(sample_payload)
+    payload.orders.append(
+        schemas.OrderInput(
+            order_id="ORD003",
+            spbu_id="SPBU001",
+            product_type="PERTALITE",
+            demand_kl=8,
+            priority=False,
+            eta=None,
+            service_time_minutes=30,
+            time_window_start="08:00",
+            time_window_end="15:00",
+        )
+    )
+
+    problem = PreprocessingService().preprocess(payload, payload.optimization_config)
+
+    assert len(problem.reload_nodes) == 1
+    assert problem.config.solver_options.first_solution_strategy == "PATH_CHEAPEST_ARC"
+    assert (
+        OrToolsSolver._resolve_first_solution_strategy(problem)
+        == routing_enums_pb2.FirstSolutionStrategy.PARALLEL_CHEAPEST_INSERTION
+    )
+
+
+def test_solver_extends_time_budget_for_heavy_multi_trip_problem(configured_modules, sample_payload):
+    payload = schemas.OptimizationRequest.model_validate(sample_payload)
+    payload.orders = [
+        schemas.OrderInput(
+            order_id=f"ORD{index:03d}",
+            spbu_id="SPBU001" if index % 2 else "SPBU002",
+            product_type="PERTALITE",
+            demand_kl=8,
+            priority=False,
+            eta=None,
+            service_time_minutes=30,
+            time_window_start="08:00",
+            time_window_end="15:00",
+        )
+        for index in range(1, 13)
+    ]
+    payload.optimization_config.solver_options.max_solver_seconds = 30
+
+    problem = PreprocessingService().preprocess(payload, payload.optimization_config)
+
+    assert OrToolsSolver._is_heavy_multi_trip_problem(problem) is True
+    assert OrToolsSolver._effective_time_limit_seconds(problem, 30) == 45
+
+
+def test_solver_stage_time_budget_remains_explicit_for_heavy_multi_trip_problem(configured_modules, sample_payload):
+    payload = schemas.OptimizationRequest.model_validate(sample_payload)
+    payload.orders = [
+        schemas.OrderInput(
+            order_id=f"ORD{index:03d}",
+            spbu_id="SPBU001" if index % 2 else "SPBU002",
+            product_type="PERTALITE",
+            demand_kl=8,
+            priority=False,
+            eta=None,
+            service_time_minutes=30,
+            time_window_start="08:00",
+            time_window_end="15:00",
+        )
+        for index in range(1, 13)
+    ]
+
+    problem = PreprocessingService().preprocess(payload, payload.optimization_config)
+    params = OrToolsSolver._build_search_parameters(problem, time_limit_seconds=7)
+
+    assert OrToolsSolver._is_heavy_multi_trip_problem(problem) is True
+    assert params.time_limit.seconds == 7
+
+
+def test_solver_keeps_requested_time_budget_for_small_multi_trip_problem(configured_modules, sample_payload):
+    payload = schemas.OptimizationRequest.model_validate(sample_payload)
+    payload.orders.append(
+        schemas.OrderInput(
+            order_id="ORD003",
+            spbu_id="SPBU001",
+            product_type="PERTALITE",
+            demand_kl=8,
+            priority=False,
+            eta=None,
+            service_time_minutes=30,
+            time_window_start="08:00",
+            time_window_end="15:00",
+        )
+    )
+    payload.optimization_config.solver_options.max_solver_seconds = 30
+
+    problem = PreprocessingService().preprocess(payload, payload.optimization_config)
+
+    assert OrToolsSolver._is_heavy_multi_trip_problem(problem) is False
+    assert OrToolsSolver._effective_time_limit_seconds(problem, 30) == 30
+
+
+def test_targeted_cleanup_problem_prioritizes_low_working_time_trucks(sample_payload):
+    payload = schemas.OptimizationRequest.model_validate(sample_payload)
+    trucks = [
+        payload.available_trucks[0].model_copy(update={"truck_id": "TRK001", "shift_end": "18:00"}),
+        payload.available_trucks[1].model_copy(update={"truck_id": "TRK002", "shift_end": "18:00"}),
+        payload.available_trucks[0].model_copy(update={"truck_id": "TRK003", "shift_end": "18:00"}),
+    ]
+    shipments = [
+        RouteNode(
+            node_index=1,
+            node_kind="shipment",
+            order_id="ORD-SERVED",
+            parent_order_id="ORD-SERVED",
+            spbu_id="SPBU001",
+            product_type="PERTALITE",
+            demand_kl=8,
+            service_time_minutes=30,
+            time_window_start=0,
+            time_window_end=1439,
+            allowed_vehicle_indices=[2],
+            matrix_node_name="SPBU001",
+        ),
+        RouteNode(
+            node_index=2,
+            node_kind="shipment",
+            order_id="ORD-UNSERVED",
+            parent_order_id="ORD-UNSERVED",
+            spbu_id="SPBU002",
+            product_type="PERTALITE",
+            demand_kl=8,
+            service_time_minutes=30,
+            time_window_start=0,
+            time_window_end=1439,
+            allowed_vehicle_indices=[0, 1, 2],
+            matrix_node_name="SPBU002",
+        ),
+    ]
+    problem = PreprocessedProblem(
+        depot_id="DPT001",
+        depot_name="Depot",
+        depot_gate_limit=3,
+        depot_operation_window_start=0,
+        depot_operation_window_end=1439,
+        dispatch_date="2026-04-10",
+        depot_service_time_minutes=30,
+        config=payload.optimization_config,
+        notes=[],
+        route_nodes=shipments,
+        preassigned_unserved=[],
+        orders=payload.orders,
+        trucks=trucks,
+        spbu_map={},
+        time_matrix=[[0]],
+        distance_matrix=[[0]],
+        matrix_positions={"DEPOT": 0},
+    )
+
+    class FakeRouting:
+        starts = {0: 100, 1: 110, 2: 120}
+        ends = {0: 101, 1: 111, 2: 121}
+
+        def Start(self, vehicle_id):
+            return self.starts[vehicle_id]
+
+        def End(self, vehicle_id):
+            return self.ends[vehicle_id]
+
+        def IsEnd(self, index):
+            return index in set(self.ends.values())
+
+        def NextVar(self, index):
+            return ("next", index)
+
+    class FakeManager:
+        def IndexToNode(self, index):
+            return {
+                100: 0,
+                101: 0,
+                110: 0,
+                111: 0,
+                120: 0,
+                121: 0,
+                1: 1,
+                2: 2,
+            }.get(index, 0)
+
+    class FakeTimeDimension:
+        def CumulVar(self, index):
+            return ("time", index)
+
+    class FakeAssignment:
+        def Value(self, value):
+            kind, index = value
+            if kind == "next":
+                return {
+                    100: 101,
+                    110: 111,
+                    120: 1,
+                    1: 121,
+                }[index]
+            return {
+                100: 360,
+                101: 480,
+                110: 360,
+                111: 420,
+                120: 360,
+                121: 660,
+            }[index]
+
+    built_model = SimpleNamespace(
+        routing=FakeRouting(),
+        manager=FakeManager(),
+        time_dimension=FakeTimeDimension(),
+        distance_dimension=None,
+        capacity_dimension=None,
+        extra_objective_vars=[],
+        extra_objective_weights=[],
+    )
+
+    targeted = OrToolsSolver._build_targeted_cleanup_problem(
+        problem,
+        built_model,
+        FakeAssignment(),
+        max_candidates_per_shipment=1,
+    )
+
+    assert targeted.route_nodes[1].allowed_vehicle_indices == [1]
+
+
+def test_forced_residual_insertion_problem_locks_served_shipments_to_seed_truck(sample_payload):
+    payload = schemas.OptimizationRequest.model_validate(sample_payload)
+    trucks = [
+        payload.available_trucks[0].model_copy(update={"truck_id": "TRK001", "shift_end": "18:00"}),
+        payload.available_trucks[1].model_copy(update={"truck_id": "TRK002", "shift_end": "18:00"}),
+    ]
+    shipments = [
+        RouteNode(
+            node_index=1,
+            node_kind="shipment",
+            order_id="ORD-SERVED",
+            parent_order_id="ORD-SERVED",
+            spbu_id="SPBU001",
+            product_type="PERTALITE",
+            demand_kl=8,
+            service_time_minutes=30,
+            time_window_start=0,
+            time_window_end=1439,
+            allowed_vehicle_indices=[0, 1],
+            matrix_node_name="SPBU001",
+        ),
+        RouteNode(
+            node_index=2,
+            node_kind="shipment",
+            order_id="ORD-UNSERVED",
+            parent_order_id="ORD-UNSERVED",
+            spbu_id="SPBU002",
+            product_type="PERTALITE",
+            demand_kl=8,
+            service_time_minutes=30,
+            time_window_start=0,
+            time_window_end=1439,
+            allowed_vehicle_indices=[0, 1],
+            matrix_node_name="SPBU002",
+        ),
+    ]
+    problem = PreprocessedProblem(
+        depot_id="DPT001",
+        depot_name="Depot",
+        depot_gate_limit=2,
+        depot_operation_window_start=0,
+        depot_operation_window_end=1439,
+        dispatch_date="2026-04-10",
+        depot_service_time_minutes=30,
+        config=payload.optimization_config,
+        notes=[],
+        route_nodes=shipments,
+        preassigned_unserved=[],
+        orders=payload.orders,
+        trucks=trucks,
+        spbu_map={},
+        time_matrix=[[0]],
+        distance_matrix=[[0]],
+        matrix_positions={"DEPOT": 0},
+    )
+
+    class FakeRouting:
+        starts = {0: 100, 1: 110}
+        ends = {0: 101, 1: 111}
+
+        def Start(self, vehicle_id):
+            return self.starts[vehicle_id]
+
+        def End(self, vehicle_id):
+            return self.ends[vehicle_id]
+
+        def IsEnd(self, index):
+            return index in set(self.ends.values())
+
+        def NextVar(self, index):
+            return ("next", index)
+
+    class FakeManager:
+        def IndexToNode(self, index):
+            return {
+                100: 0,
+                101: 0,
+                110: 0,
+                111: 0,
+                1: 1,
+            }.get(index, 0)
+
+    class FakeTimeDimension:
+        def CumulVar(self, index):
+            return ("time", index)
+
+    class FakeAssignment:
+        def Value(self, value):
+            kind, index = value
+            if kind == "next":
+                return {
+                    100: 1,
+                    1: 101,
+                    110: 111,
+                }[index]
+            return {
+                100: 360,
+                101: 480,
+                110: 360,
+                111: 420,
+            }[index]
+
+    built_model = SimpleNamespace(
+        routing=FakeRouting(),
+        manager=FakeManager(),
+        time_dimension=FakeTimeDimension(),
+        distance_dimension=None,
+        capacity_dimension=None,
+        extra_objective_vars=[],
+        extra_objective_weights=[],
+    )
+
+    forced = OrToolsSolver._build_forced_residual_insertion_problem(
+        problem,
+        built_model,
+        FakeAssignment(),
+        max_candidates_per_shipment=1,
+    )
+
+    assert forced.route_nodes[0].allowed_vehicle_indices == [0]
+    assert forced.route_nodes[1].allowed_vehicle_indices == [1]
+
+
+def test_manual_residual_routes_append_reload_and_shipment_to_lowest_working_truck(sample_payload):
+    payload = schemas.OptimizationRequest.model_validate(sample_payload)
+    trucks = [
+        payload.available_trucks[0].model_copy(update={"truck_id": "TRK001", "shift_end": "18:00"}),
+        payload.available_trucks[1].model_copy(update={"truck_id": "TRK002", "shift_end": "18:00"}),
+    ]
+    shipments = [
+        RouteNode(
+            node_index=1,
+            node_kind="shipment",
+            order_id="ORD-SERVED",
+            parent_order_id="ORD-SERVED",
+            spbu_id="SPBU001",
+            product_type="PERTALITE",
+            demand_kl=8,
+            service_time_minutes=30,
+            time_window_start=0,
+            time_window_end=1439,
+            allowed_vehicle_indices=[0],
+            matrix_node_name="SPBU001",
+        ),
+        RouteNode(
+            node_index=2,
+            node_kind="shipment",
+            order_id="ORD-UNSERVED",
+            parent_order_id="ORD-UNSERVED",
+            spbu_id="SPBU002",
+            product_type="PERTALITE",
+            demand_kl=8,
+            service_time_minutes=30,
+            time_window_start=0,
+            time_window_end=1439,
+            allowed_vehicle_indices=[0, 1],
+            matrix_node_name="SPBU002",
+        ),
+        RouteNode(
+            node_index=3,
+            node_kind="reload",
+            order_id="DEPOT_RELOAD#1",
+            parent_order_id="-",
+            spbu_id="DPT001",
+            product_type="-",
+            demand_kl=0,
+            service_time_minutes=30,
+            time_window_start=0,
+            time_window_end=1439,
+            allowed_vehicle_indices=[0, 1],
+            matrix_node_name="DEPOT",
+        ),
+    ]
+    problem = PreprocessedProblem(
+        depot_id="DPT001",
+        depot_name="Depot",
+        depot_gate_limit=2,
+        depot_operation_window_start=0,
+        depot_operation_window_end=1439,
+        dispatch_date="2026-04-10",
+        depot_service_time_minutes=30,
+        config=payload.optimization_config,
+        notes=[],
+        route_nodes=shipments,
+        preassigned_unserved=[],
+        orders=payload.orders,
+        trucks=trucks,
+        spbu_map={},
+        time_matrix=[[0]],
+        distance_matrix=[[0]],
+        matrix_positions={"DEPOT": 0},
+    )
+
+    class FakeRouting:
+        starts = {0: 100, 1: 110}
+        ends = {0: 101, 1: 111}
+
+        def Start(self, vehicle_id):
+            return self.starts[vehicle_id]
+
+        def End(self, vehicle_id):
+            return self.ends[vehicle_id]
+
+        def IsEnd(self, index):
+            return index in set(self.ends.values())
+
+        def NextVar(self, index):
+            return ("next", index)
+
+    class FakeManager:
+        def IndexToNode(self, index):
+            return {
+                100: 0,
+                101: 0,
+                110: 0,
+                111: 0,
+                1: 1,
+            }.get(index, 0)
+
+    class FakeTimeDimension:
+        def CumulVar(self, index):
+            return ("time", index)
+
+    class FakeAssignment:
+        def Value(self, value):
+            kind, index = value
+            if kind == "next":
+                return {
+                    100: 1,
+                    1: 101,
+                    110: 111,
+                }[index]
+            return {
+                100: 360,
+                101: 720,
+                110: 360,
+                111: 420,
+            }[index]
+
+    built_model = SimpleNamespace(
+        routing=FakeRouting(),
+        manager=FakeManager(),
+        time_dimension=FakeTimeDimension(),
+        distance_dimension=None,
+        capacity_dimension=None,
+        extra_objective_vars=[],
+        extra_objective_weights=[],
+    )
+
+    routes = OrToolsSolver._build_manual_residual_routes(
+        problem,
+        built_model,
+        FakeAssignment(),
+        max_candidates_per_shipment=2,
+    )
+
+    assert routes == [[1], [3, 2]]
+
+
+def test_best_effort_pipeline_uses_cleanup_seed_for_following_refinement(
+    configured_modules,
+    sample_payload,
+    monkeypatch,
+):
+    payload = schemas.OptimizationRequest.model_validate(sample_payload)
+    problem = PreprocessingService().preprocess(payload, payload.optimization_config)
+    solver = OrToolsSolver()
+
+    base_assignment = object()
+    cleanup_assignment = object()
+    base_model = SimpleNamespace(name="base")
+    cleanup_model = SimpleNamespace(name="cleanup")
+    captured_seed_models = []
+
+    monkeypatch.setattr(OrToolsSolver, "_allocate_best_effort_budgets", staticmethod(lambda _seconds: (10, 0, 5, 5, 5)))
+    monkeypatch.setattr(
+        OrToolsSolver,
+        "_solve_stage",
+        lambda self, _problem, **_kwargs: ortools_solver_module.StageSolveResult(
+            built_model=base_model,
+            assignment=base_assignment,
+            search_status=routing_enums_pb2.RoutingSearchStatus.ROUTING_SUCCESS,
+        ),
+    )
+    monkeypatch.setattr(
+        OrToolsSolver,
+        "_count_unserved_shipments",
+        staticmethod(lambda _problem, _model, assignment: 2 if assignment is base_assignment else 0),
+    )
+    monkeypatch.setattr(
+        OrToolsSolver,
+        "_run_targeted_cleanup_repair",
+        lambda self, _problem, **_kwargs: (cleanup_model, cleanup_assignment, 0),
+    )
+
+    def fake_refine(self, _problem, *, seed_model, seed_assignment, **_kwargs):
+        captured_seed_models.append((seed_model, seed_assignment))
+        return ortools_solver_module.StageSolveResult(
+            built_model=seed_model,
+            assignment=None,
+            search_status=routing_enums_pb2.RoutingSearchStatus.ROUTING_FAIL_TIMEOUT,
+        )
+
+    monkeypatch.setattr(OrToolsSolver, "_refine_stage", fake_refine)
+
+    output = solver._run_best_effort_pipeline(
+        problem,
+        started=0.0,
+        total_seconds=25,
+    )
+
+    assert output.assignment is cleanup_assignment
+    assert all(seed_model is cleanup_model for seed_model, _seed_assignment in captured_seed_models)
+    assert "targeted cleanup repair" in output.message
+
+
+def test_best_effort_pipeline_uses_forced_residual_seed_when_cleanup_does_not_improve(
+    configured_modules,
+    sample_payload,
+    monkeypatch,
+):
+    payload = schemas.OptimizationRequest.model_validate(sample_payload)
+    problem = PreprocessingService().preprocess(payload, payload.optimization_config)
+    solver = OrToolsSolver()
+
+    base_assignment = object()
+    forced_assignment = object()
+    base_model = SimpleNamespace(name="base")
+    forced_model = SimpleNamespace(name="forced")
+    captured_seed_models = []
+
+    monkeypatch.setattr(OrToolsSolver, "_allocate_best_effort_budgets", staticmethod(lambda _seconds: (10, 0, 6, 5, 5)))
+    monkeypatch.setattr(
+        OrToolsSolver,
+        "_solve_stage",
+        lambda self, _problem, **_kwargs: ortools_solver_module.StageSolveResult(
+            built_model=base_model,
+            assignment=base_assignment,
+            search_status=routing_enums_pb2.RoutingSearchStatus.ROUTING_SUCCESS,
+        ),
+    )
+    monkeypatch.setattr(
+        OrToolsSolver,
+        "_count_unserved_shipments",
+        staticmethod(lambda _problem, _model, assignment: 2 if assignment is base_assignment else 0),
+    )
+    monkeypatch.setattr(OrToolsSolver, "_run_targeted_cleanup_repair", lambda self, _problem, **_kwargs: None)
+    monkeypatch.setattr(
+        OrToolsSolver,
+        "_run_forced_residual_insertion",
+        lambda self, _problem, **_kwargs: (forced_model, forced_assignment, 0),
+    )
+
+    def fake_refine(self, _problem, *, seed_model, seed_assignment, **_kwargs):
+        captured_seed_models.append((seed_model, seed_assignment))
+        return ortools_solver_module.StageSolveResult(
+            built_model=seed_model,
+            assignment=None,
+            search_status=routing_enums_pb2.RoutingSearchStatus.ROUTING_FAIL_TIMEOUT,
+        )
+
+    monkeypatch.setattr(OrToolsSolver, "_refine_stage", fake_refine)
+
+    output = solver._run_best_effort_pipeline(
+        problem,
+        started=0.0,
+        total_seconds=26,
+    )
+
+    assert output.assignment is forced_assignment
+    assert all(seed_model is forced_model for seed_model, _seed_assignment in captured_seed_models)
+    assert "forced residual insertion" in output.message
+
+
+def test_forced_residual_insertion_uses_manual_seed_when_local_attempts_fail(
+    configured_modules,
+    sample_payload,
+    monkeypatch,
+):
+    payload = schemas.OptimizationRequest.model_validate(sample_payload)
+    problem = PreprocessingService().preprocess(payload, payload.optimization_config)
+    solver = OrToolsSolver()
+
+    seed_model = SimpleNamespace(name="seed")
+    seed_assignment = object()
+    manual_assignment = object()
+    manual_model = SimpleNamespace(name="manual")
+
+    monkeypatch.setattr(OrToolsSolver, "_targeted_cleanup_candidate_limits", staticmethod(lambda _problem, _unserved: [1]))
+    monkeypatch.setattr(OrToolsSolver, "_allocate_cleanup_attempt_budgets", staticmethod(lambda _seconds, _attempts: [1, 1]))
+    monkeypatch.setattr(OrToolsSolver, "_build_forced_residual_insertion_problem", staticmethod(lambda problem, *_args, **_kwargs: problem))
+    monkeypatch.setattr(
+        OrToolsSolver,
+        "_refine_stage",
+        lambda self, _problem, **_kwargs: ortools_solver_module.StageSolveResult(
+            built_model=seed_model,
+            assignment=None,
+            search_status=routing_enums_pb2.RoutingSearchStatus.ROUTING_FAIL_TIMEOUT,
+        ),
+    )
+    monkeypatch.setattr(OrToolsSolver, "_build_manual_residual_routes", staticmethod(lambda *_args, **_kwargs: [[1], [2]]))
+    monkeypatch.setattr(
+        OrToolsSolver,
+        "_solve_from_manual_routes",
+        staticmethod(
+            lambda _problem, _routes, **_kwargs: ortools_solver_module.StageSolveResult(
+                built_model=manual_model,
+                assignment=manual_assignment,
+                search_status=routing_enums_pb2.RoutingSearchStatus.ROUTING_SUCCESS,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        OrToolsSolver,
+        "_count_unserved_shipments",
+        staticmethod(lambda _problem, _model, assignment: 0 if assignment is manual_assignment else 2),
+    )
+
+    result = solver._run_forced_residual_insertion(
+        problem,
+        seed_model=seed_model,
+        seed_assignment=seed_assignment,
+        current_unserved=2,
+        time_limit_seconds=2,
+    )
+
+    assert result is not None
+    model, assignment, unserved = result
+    assert model is manual_model
+    assert assignment is manual_assignment
+    assert unserved == 0
 
 
 def test_solver_respects_depot_gate_limit_queue(configured_modules, monkeypatch):
@@ -1527,6 +2233,129 @@ def test_result_service_collapses_initial_depot_reload_block_into_wait():
     assert normalized[0].trip_sequence == 1
     assert normalized[1].trip_sequence == 1
     assert trip_count == 1
+
+
+def test_result_service_preserves_reload_before_wait_when_delivery_follows():
+    service = ResultService()
+    raw_stops = [
+        schemas.RouteStopResponse(
+            sequence=1,
+            order_id="ORD001",
+            parent_order_id="ORD001",
+            spbu_id="SPBU001",
+            stop_kind="delivery",
+            trip_sequence=1,
+            spbu_name="SPBU A",
+            travel_path="DPT001 -> SPBU001",
+            segment_max_velocity_kmh="40",
+            travel_distance_km=10,
+            travel_time_minutes=30,
+            eta="08:00",
+            etd="08:30",
+            delivered_volume=8,
+            arrival_status="on_time",
+        ),
+        schemas.RouteStopResponse(
+            sequence=2,
+            order_id="DEPOT_RELOAD#1",
+            parent_order_id="-",
+            spbu_id="DPT001",
+            stop_kind="depot_reload",
+            trip_sequence=2,
+            spbu_name="Depot Test",
+            travel_path="SPBU001 -> DPT001",
+            segment_max_velocity_kmh="-",
+            travel_distance_km=10,
+            travel_time_minutes=30,
+            eta="09:00",
+            etd="09:30",
+            delivered_volume=0,
+            arrival_status="reloaded_at_depot",
+        ),
+        schemas.RouteStopResponse(
+            sequence=3,
+            order_id="DEPOT_WAIT#1",
+            parent_order_id="-",
+            spbu_id="DPT001",
+            stop_kind="depot_wait",
+            trip_sequence=2,
+            spbu_name="Depot Test",
+            travel_path="",
+            segment_max_velocity_kmh="-",
+            travel_distance_km=None,
+            travel_time_minutes=None,
+            eta="09:30",
+            etd="10:00",
+            delivered_volume=0,
+            arrival_status="waiting_at_depot",
+        ),
+        schemas.RouteStopResponse(
+            sequence=4,
+            order_id="ORD002",
+            parent_order_id="ORD002",
+            spbu_id="SPBU002",
+            stop_kind="delivery",
+            trip_sequence=2,
+            spbu_name="SPBU B",
+            travel_path="DPT001 -> SPBU002",
+            segment_max_velocity_kmh="40",
+            travel_distance_km=12,
+            travel_time_minutes=35,
+            eta="11:00",
+            etd="11:30",
+            delivered_volume=8,
+            arrival_status="on_time",
+        ),
+    ]
+
+    normalized, trip_count = service._normalize_route_stops(raw_stops)
+
+    assert [stop.stop_kind for stop in normalized] == ["delivery", "depot_reload", "depot_wait", "delivery"]
+    assert normalized[1].order_id == "DEPOT_RELOAD#1"
+    assert normalized[1].trip_sequence == 2
+    assert normalized[2].order_id == "DEPOT_WAIT#1"
+    assert normalized[2].trip_sequence == 2
+    assert normalized[3].trip_sequence == 2
+    assert trip_count == 2
+
+
+def test_persisted_leg_snapshot_handles_next_day_return_time():
+    service = ResultService()
+
+    snapshot = service._build_persisted_leg_snapshot(
+        "94",
+        "65",
+        origin_etd="18:00",
+        destination_eta="00:00",
+    )
+
+    assert snapshot["travel_path"] == "94 -> 65"
+    assert snapshot["travel_time_minutes"] == 360.0
+
+
+def test_persisted_leg_snapshot_uses_network_audit_for_path_and_max_velocity():
+    service = ResultService(
+        network_client=SimpleNamespace(
+            get_leg_audit=lambda origin_id, destination_id: {
+                "travel_path": f"{origin_id} -> HUB01 -> {destination_id}",
+                "segment_max_velocity_kmh": "35 / 25",
+                "travel_distance_km": 42.5,
+                "travel_time_minutes": 999.0,
+            }
+        )
+    )
+
+    snapshot = service._build_persisted_leg_snapshot(
+        "65",
+        "74",
+        origin_etd="06:30",
+        destination_eta="08:00",
+    )
+
+    assert snapshot["travel_path"] == "65 -> HUB01 -> 74"
+    assert snapshot["segment_max_velocity_kmh"] == "35 / 25"
+    assert snapshot["travel_distance_km"] == 42.5
+    assert snapshot["travel_time_minutes"] == 90.0
 
 
 def test_depot_operation_end_uses_last_gate_out_not_return_eta():

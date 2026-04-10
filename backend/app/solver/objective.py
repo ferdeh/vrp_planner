@@ -7,7 +7,7 @@ from app.models import schemas
 
 def active_objective_priority(config: schemas.OptimizationConfig) -> list[str]:
     ordered = [item for item in config.objective_priority if getattr(config, item, False)]
-    return ordered or ["minimize_unserved_orders"]
+    return ordered or ["minimize_distance"]
 
 
 def objective_priority_scale(config: schemas.OptimizationConfig, objective_key: str) -> int:
@@ -19,10 +19,7 @@ def objective_priority_scale(config: schemas.OptimizationConfig, objective_key: 
 
 
 def effective_unserved_penalty(config: schemas.OptimizationConfig) -> int:
-    base_penalty = int(round(config.penalties.unserved_order_penalty))
-    if not config.minimize_unserved_orders:
-        return base_penalty
-    return max(1, base_penalty * objective_priority_scale(config, "minimize_unserved_orders"))
+    return max(1, int(round(config.penalties.unserved_order_penalty)))
 
 
 def vehicle_fixed_cost(truck: schemas.TruckInput, config: schemas.OptimizationConfig) -> int:

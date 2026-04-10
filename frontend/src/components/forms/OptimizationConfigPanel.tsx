@@ -2,11 +2,6 @@ import { useEffect, useRef, useState, type DragEvent } from "react";
 
 const objectiveItems = [
   {
-    key: "minimize_unserved_orders",
-    label: "Minimize unserved orders",
-    description: "Utamakan order terlayani sebanyak mungkin sebelum mengejar objective lain.",
-  },
-  {
     key: "minimize_truck_count",
     label: "Minimize truck count",
     description: "Prioritaskan jumlah truck aktif minimum.",

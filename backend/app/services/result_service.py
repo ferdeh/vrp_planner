@@ -12,7 +12,7 @@ from app.services.master_data_client import MasterDataClient
 from app.services.network_client import NetworkClient
 from app.services.preprocessing_service import PreprocessedProblem
 from app.solver.ortools_solver import SolverOutput
-from app.utils.time_utils import hhmm_to_minutes, minutes_to_hhmm
+from app.utils.time_utils import elapsed_minutes, hhmm_to_minutes, minutes_to_hhmm
 
 
 class ResultService:
@@ -48,16 +48,13 @@ class ResultService:
         origin_etd: str | None,
         destination_eta: str | None,
     ) -> dict[str, str | float | None]:
-        origin_minutes = hhmm_to_minutes(origin_etd)
-        destination_minutes = hhmm_to_minutes(destination_eta)
-        travel_minutes = None
-        if origin_minutes is not None and destination_minutes is not None:
-            travel_minutes = float(max(0, destination_minutes - origin_minutes))
+        travel_minutes = elapsed_minutes(origin_etd, destination_eta)
+        leg_audit = self._get_leg_audit_safe(origin_id, destination_id)
         return {
-            "travel_path": f"{origin_id} -> {destination_id}",
-            "segment_max_velocity_kmh": "-",
-            "travel_distance_km": None,
-            "travel_time_minutes": travel_minutes,
+            "travel_path": str(leg_audit.get("travel_path") or f"{origin_id} -> {destination_id}"),
+            "segment_max_velocity_kmh": str(leg_audit.get("segment_max_velocity_kmh") or "-"),
+            "travel_distance_km": float(leg_audit["travel_distance_km"]) if leg_audit.get("travel_distance_km") is not None else None,
+            "travel_time_minutes": float(travel_minutes) if travel_minutes is not None else None,
         }
 
     def _build_unserved_constraint_details(
@@ -323,7 +320,10 @@ class ResultService:
             block = stops[index:block_end]
 
             previous_stop = normalized[-1] if normalized else None
-            next_stop = stops[block_end] if block_end < len(stops) else None
+            next_stop_index = block_end
+            while next_stop_index < len(stops) and stops[next_stop_index].stop_kind == "depot_wait":
+                next_stop_index += 1
+            next_stop = stops[next_stop_index] if next_stop_index < len(stops) else None
             has_previous_delivery = previous_stop is not None and previous_stop.stop_kind == "delivery"
             has_next_delivery = next_stop is not None and next_stop.stop_kind == "delivery"
 

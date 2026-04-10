@@ -2,6 +2,10 @@
 
 MVP full stack untuk optimisasi dispatch distribusi BBM dari depot ke SPBU. Aplikasi ini menghitung kebutuhan truck minimum, komposisi tipe truck yang optimal, assignment order ke truck, urutan rute, total biaya, dan daftar order yang tidak terlayani bila infeasible.
 
+Dokumentasi teknis tambahan:
+
+- [docs/solver-pipeline.md](/Users/ferdiansyahzulkarnain/Documents/my Dev/vrp_planner/docs/solver-pipeline.md)
+
 ## 1. Konteks bisnis
 
 Distribusi BBM harian memiliki loading order ke banyak SPBU dengan demand, time window, dan aturan kompatibilitas kendaraan yang berbeda. Perusahaan perlu menjawab secara cepat:
@@ -17,7 +21,7 @@ MVP ini fokus pada dispatch harian dan estimasi requirement armada. Master data 
 
 - meminimalkan jumlah truck aktif
 - meminimalkan biaya distribusi berbasis fixed cost, jarak, dan waktu
-- menjaga pemenuhan demand sebisa mungkin
+- mengupayakan full-service lebih dahulu sebelum turun ke partial solution bila memang tidak feasible
 - menghormati time window, policy akses node, dan batas operasi kendaraan
 - memberi kontrol hard constraint dan soft constraint kepada user operasional
 
@@ -42,7 +46,7 @@ Alur utama:
 - 1 depot per optimisasi
 - semua truck dianggap kompatibel dengan semua produk supported
 - setiap node SPBU dapat membatasi `truck_category` maksimum yang boleh masuk
-- multi-trip didukung selama total route masih memenuhi batas working time, route duration, dan distance per vehicle
+- multi-trip didukung lewat node reload depot di dalam satu route truck; batas waktu, jarak, dan jam kerja tetap akumulatif per truck fisik
 - satu shipment hanya boleh membawa satu produk untuk satu compartment
 - dalam satu trip, satu compartment hanya boleh dipakai untuk satu shipment; truck harus reload ke depot sebelum memakai compartment yang sama lagi
 - assignment compartment masih dimodelkan implisit lewat split shipment per kapasitas compartment dan count shipment per compartment, belum sampai mapping compartment fisik per stop di solver
@@ -197,11 +201,6 @@ Mock mode menyediakan depot, SPBU, dan matriks network sintetis berbasis koordin
 Bagian ini ditujukan sebagai petunjuk user operasional saat mengisi form optimisasi.
 
 ### Objective
-
-- `Minimize unserved orders`
-  Arti: menjadikan jumlah order yang tidak terkirim sebagai prioritas tertinggi saat `Allow unserved` aktif.
-  Kapan dipakai: hampir selalu direkomendasikan untuk operasi harian, terutama bila user ingin solver terus mengusahakan pengiriman order selama waktu dan armada masih tersedia.
-
 - `Minimize truck count`
   Arti: mendorong solver memakai jumlah truck aktif sesedikit mungkin.
   Kapan dipakai: saat target utama adalah efisiensi armada dan pengurangan jumlah kendaraan keluar depot.
@@ -319,17 +318,26 @@ Objective pada form bisa diurutkan dengan drag and drop. Urutan paling atas dipr
 
 Urutan solve yang dipakai:
 
-- Tahap 1, `service level`
-  Solver mencari solusi dengan jumlah `unserved` seminimal mungkin terlebih dahulu.
+- Tahap 1, `strict full-service`
+  Solver terlebih dahulu mencoba solusi yang melayani semua shipment dengan `allow_unserved_orders = false`. Pada tahap ini objective biaya utama dimatikan agar fokus ke coverage.
 
-- Tahap 2, `quality repair`
-  Jika masih ada order tersisa, solver menjalankan repair pass untuk mencoba memasukkan order unserved ke route yang masih punya ruang waktu kerja.
+- Tahap 2, `seeded full-service optimization`
+  Jika full-service ditemukan, solusi tersebut dipakai sebagai seed untuk mengoptimalkan objective biaya, jarak, waktu, dan objective lain tanpa boleh drop order.
 
-- Tahap 3, `lateness/overtime refinement`
-  Setelah service level terbaik ditemukan, solver memperbaiki soft lateness, ETA priority, dan overtime.
+- Tahap 3, `best-effort partial fallback`
+  Jika full-service gagal dan `Allow unserved` aktif, solver turun ke mode partial dengan penalti unserved sangat besar untuk mencari partial solution terbaik.
 
-- Tahap 4, `cost/time refinement`
-  Baru setelah itu solver mengoptimalkan objective penuh seperti truck count, distance, time, dan depot operation time sesuai urutan prioritas user.
+- Tahap 4, `repair dan targeted cleanup`
+  Dari partial solution yang sudah ada, solver menjalankan seeded repair untuk order sisa. Shipment unserved diprioritaskan ke truck dengan jam kerja aktual paling rendah atau slack waktu terbaik.
+
+- Tahap 5, `forced residual insertion`
+  Jika cleanup biasa belum cukup, solver mengunci shipment yang sudah served ke truck asalnya lalu memfokuskan search hanya pada order residual.
+
+- Tahap 6, `manual residual trip constructor`
+  Jika local search masih buntu, backend membangun seed route residual secara eksplisit dengan pola `reload -> shipment residual`, lalu menyerahkannya kembali ke OR-Tools sebagai seed.
+
+- Tahap 7, `final objective refinement`
+  Setelah coverage terbaik ditemukan, solver menjalankan refinement akhir untuk objective penuh seperti truck count, distance, time, dan depot operation time sesuai urutan prioritas user.
 
 Artinya, objective seperti `Minimize truck count` atau `Minimize depot operation time` tidak boleh lagi mengalahkan target dasar untuk tetap mengirim order bila masih ada peluang operasional.
 
@@ -368,7 +376,7 @@ Artinya, objective seperti `Minimize truck count` atau `Minimize depot operation
   Solver boleh meninggalkan shipment tidak terlayani dengan penalti. Order priority hanya boleh tidak terlayani bila `SPBU Priority` tidak aktif sebagai hard maupun soft.
 
   Catatan perilaku solver:
-  jika opsi ini aktif, solver tetap lebih dulu mengejar jumlah unserved minimum sebelum masuk ke objective biaya dan efisiensi lain.
+  jika opsi ini aktif, backend tetap mencoba `strict full-service` lebih dulu. Bila gagal, barulah solver turun ke best-effort partial lalu menjalankan repair dan cleanup untuk menutup order sisa sebelum menerima hasil partial akhir.
 
 - `Time window SPBU`
   Solver boleh datang lewat `TW End` node SPBU, tetapi setiap menit keterlambatan dikenai `late_arrival_penalty_per_minute`. Tidak ada input nilai tambahan karena jendela waktunya langsung mengikuti master data SPBU.
@@ -496,20 +504,25 @@ Objective praktis untuk MVP:
 
 Mulai versi sekarang, solver orchestration memakai pipeline multi-stage:
 
-- `Stage 1: service-level solve`
-  Model awal fokus mengecilkan jumlah shipment unserved.
-- `Stage 2: repair pass`
-  Jika hasil masih partial, solver menjalankan seeded repair untuk mencoba memasukkan order yang masih drop ke route yang masih feasible.
-- `Stage 3: lateness/overtime refinement`
-  Solusi terbaik dari stage sebelumnya dipakai sebagai seed untuk memperbaiki priority ETA, time window soft, dan overtime.
-- `Stage 4: full objective refinement`
-  Baru setelah itu solver menjalankan objective penuh sesuai urutan priority objective dari user.
+- `Stage 1: strict full-service solve`
+  Model awal memaksa semua shipment tetap mandatory. Tujuannya adalah mencari solusi full-service lebih dulu sebelum objective biaya dipertimbangkan.
+- `Stage 2: seeded full-service refinement`
+  Jika full-service ditemukan, solusi dipakai sebagai seed untuk objective penuh tanpa boleh drop shipment.
+- `Stage 3: best-effort fallback`
+  Jika strict full-service gagal dan `Allow unserved` aktif, solver membangun partial solution dengan penalti unserved sangat besar.
+- `Stage 4: targeted cleanup repair`
+  Solver mencoba memasukkan shipment residual ke truck dengan jam kerja aktual paling rendah atau slack terbaik.
+- `Stage 5: forced residual insertion`
+  Shipment yang sudah served dikunci ke truck asal agar pencarian fokus pada residual shipment.
+- `Stage 6: manual residual trip construction`
+  Jika seeded local search gagal, backend membangun seed route residual `reload -> shipment` secara eksplisit lalu mengirimkannya kembali ke OR-Tools.
+- `Stage 7: final objective refinement`
+  Setelah coverage terbaik ditemukan, solver menjalankan refinement akhir untuk objective biaya, jarak, waktu, dan depot span.
 
 Fallback tambahan:
 
-- jika `Allow unserved = false` dan solver tidak menemukan full-feasible solution dalam batas waktu, backend otomatis menjalankan `best-effort fallback`
-- fallback ini menyalakan `Allow unserved` secara internal dengan penalty sangat besar lalu mengembalikan partial solution terbaik yang ditemukan
-- tujuannya agar user tidak hanya menerima status `timeout` kosong saat sebenarnya sistem masih bisa memberi solusi operasional terbaik
+- jika `Allow unserved = false` dan solver tidak menemukan full-feasible solution dalam batas waktu, backend mengembalikan hasil strict solve apa adanya
+- jika `Allow unserved = true`, backend boleh turun ke `best-effort fallback` dengan penalty unserved sangat besar agar user tetap menerima solusi operasional terbaik yang ditemukan
 
 Aturan antrean depot yang dipakai saat ini:
 
@@ -519,7 +532,9 @@ Aturan antrean depot yang dipakai saat ini:
 - setiap truck aktif membuat interval `Depot Service` berdurasi tetap dan interval ini hanya dihitung bila truck benar-benar dipakai solver
 - semua interval `Depot Service` dibatasi constraint `Cumulative` dengan kapasitas `gate_limit`, sehingga paling banyak `gate_limit` truck bisa loading bersamaan
 - solver menambahkan node reload depot opsional di tengah route agar truck dapat kembali ke depot, mengisi ulang, lalu berangkat lagi pada trip berikutnya
-- reload depot mereset kapasitas truck dan memakai resource gate yang sama dengan service awal di depot
+- reload depot sekarang dibentuk per grup truck, misalnya truck kecil `8 KL / 1 compartment` dan truck besar `16 KL / 2 compartment` memakai reload node yang berbeda
+- reload depot mereset kapasitas dan jumlah compartment sesuai grup truck tersebut, bukan lagi memakai reset global armada
+- reload depot tetap memakai resource gate yang sama dengan service awal di depot
 - jika `depot_operation_window` aktif sebagai hard constraint, awal service depot pertama dan akhir service depot terakhir wajib berada di dalam TW depot
 - jika `depot_operation_window` aktif sebagai soft constraint, pelanggaran awal atau akhir operasi depot tetap boleh terjadi tetapi dihitung penalty per menit
 - truck boleh `gate out` lebih awal lalu menunggu keperluan time window SPBU, tetapi antrean depot hanya terjadi jika resource bay sudah penuh
@@ -758,9 +773,9 @@ Cakupan test yang tersedia:
 ## 20. Roadmap fase berikutnya
 
 - multi depot
-- multi trip
 - explicit compartment-to-stop assignment di solver
 - explicit product-to-compartment assignment di solver
+- richer residual-trip heuristics dan diagnosa constraint invalidation
 - richer truck category policy UI/visualization
 - driver scheduling
 - GIS/tile map visualization yang lebih kaya di atas route map graph yang sudah ada
@@ -779,6 +794,7 @@ Cakupan test yang tersedia:
 - split order dihitung terhadap kapasitas compartment feasible terbesar, bukan lagi langsung terhadap kapasitas total truck
 - setiap shipment mengonsumsi satu compartment pada satu trip, walaupun volume shipment lebih kecil dari kapasitas compartment
 - truck wajib kembali reload ke depot sebelum dapat memakai compartment yang sama untuk shipment berikutnya
+- reload node depot dibentuk per grup truck agar reset kapasitas dan jumlah compartment sesuai tipe truck yang menggunakannya
 - `gate_limit` depot dibaca dari master data node depot dengan beberapa fallback field seperti `gate_limit`, `bay_count`, `gate_count`, atau jumlah item daftar bay bila API mengirim struktur list
 - `tw_start` dan `tw_end` depot dibaca langsung dari node depot master data
 - jika `gate_limit` tidak tersedia atau bernilai tidak valid, sistem fallback ke jumlah truck pada skenario agar antrean depot tidak membuat constraint palsu

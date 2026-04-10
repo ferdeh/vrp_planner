@@ -488,8 +488,6 @@ export function NewOptimizationPage() {
               return null;
             }
             switch (key) {
-              case "minimize_unserved_orders":
-                return "Minimize unserved orders";
               case "minimize_truck_count":
                 return "Minimize truck count";
               case "minimize_distance":

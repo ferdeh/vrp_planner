@@ -1,4 +1,11 @@
-export type SolutionStatus = "processing" | "feasible" | "infeasible" | "partial" | "timeout" | "error";
+export type SolutionStatus =
+  | "processing"
+  | "feasible"
+  | "infeasible"
+  | "partial"
+  | "preprocessing_failed"
+  | "timeout"
+  | "error";
 export type AnalysisLevel = "level_1" | "level_2";
 export type AnalysisStatus = "processing" | "completed" | "error";
 
@@ -100,7 +107,6 @@ export interface MasterEffectiveEdge {
 }
 
 export interface OptimizationConfig {
-  minimize_unserved_orders: boolean;
   minimize_truck_count: boolean;
   minimize_distance: boolean;
   minimize_time: boolean;
@@ -289,6 +295,8 @@ export interface ScenarioListItem {
   dispatch_date: string;
   depot_id: string;
   status: SolutionStatus;
+  total_demand: number;
+  total_delivered_demand: number;
   active_truck_count: number;
   total_cost: number;
   total_distance: number;

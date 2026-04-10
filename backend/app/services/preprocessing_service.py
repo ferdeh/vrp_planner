@@ -10,7 +10,7 @@ from typing import Literal
 
 from app.models import schemas
 from app.services.master_data_client import MasterDataClient
-from app.services.network_client import NetworkClient
+from app.services.network_client import NetworkClient, NetworkDataError
 from app.utils.time_utils import clamp_window, hhmm_to_minutes
 from app.utils.validators import validate_order, validate_truck
 
@@ -33,6 +33,8 @@ class RouteNode:
     matrix_node_name: str
     priority: bool = False
     priority_eta_minutes: int | None = None
+    reload_capacity_kl: float = 0.0
+    reload_compartment_count: int = 0
 
 
 @dataclass
@@ -117,6 +119,58 @@ class PreprocessingService:
             return 0
         return max(1, min(len(shipments) - 1, theoretical_reload_count))
 
+    def _group_reload_vehicle_indices(
+        self,
+        available_trucks: list[schemas.TruckInput],
+    ) -> list[tuple[list[int], float, int]]:
+        grouped: dict[tuple[float, int], list[int]] = {}
+        for index, truck in enumerate(available_trucks):
+            key = (round(truck.capacity_kl, 6), max(1, len(truck.compartments)))
+            grouped.setdefault(key, []).append(index)
+        groups = [
+            (indices, capacity_kl, compartment_count)
+            for (capacity_kl, compartment_count), indices in grouped.items()
+        ]
+        return sorted(groups, key=lambda item: (item[1], item[2], item[0][0]))
+
+    def _allocate_group_reload_counts(
+        self,
+        reload_node_count: int,
+        grouped_vehicle_indices: list[tuple[list[int], float, int]],
+    ) -> list[int]:
+        if reload_node_count <= 0 or not grouped_vehicle_indices:
+            return []
+        if len(grouped_vehicle_indices) == 1:
+            return [reload_node_count]
+
+        allocated = [0] * len(grouped_vehicle_indices)
+        remaining = reload_node_count
+        if reload_node_count <= len(grouped_vehicle_indices):
+            for group_index in range(reload_node_count):
+                allocated[group_index] = 1
+            return allocated
+
+        for group_index in range(len(grouped_vehicle_indices)):
+            allocated[group_index] = 1
+            remaining -= 1
+
+        total_trucks = sum(len(indices) for indices, _capacity, _compartments in grouped_vehicle_indices)
+        weighted_shares = [
+            (remaining * len(indices)) / max(1, total_trucks)
+            for indices, _capacity, _compartments in grouped_vehicle_indices
+        ]
+        for group_index, share in enumerate(weighted_shares):
+            bonus = int(math.floor(share))
+            allocated[group_index] += bonus
+            remaining -= bonus
+        while remaining > 0:
+            for group_index in range(len(allocated)):
+                if remaining <= 0:
+                    break
+                allocated[group_index] += 1
+                remaining -= 1
+        return allocated
+
     def preprocess(
         self,
         payload: schemas.OptimizationRequest,
@@ -156,8 +210,18 @@ class PreprocessingService:
                 f"SPBU not found in master data for depot {payload.depot_id}: {', '.join(missing_spbu)}"
             )
 
-        time_matrix_response = self.network_client.get_time_matrix(payload.depot_id, spbu_ids)
-        distance_matrix_response = self.network_client.get_distance_matrix(payload.depot_id, spbu_ids)
+        try:
+            time_matrix_response = self.network_client.get_time_matrix(payload.depot_id, spbu_ids)
+        except NetworkDataError as exc:
+            raise ValueError(
+                f"Time matrix from SPBU network master data is unavailable for depot {payload.depot_id}: {exc}"
+            ) from exc
+        try:
+            distance_matrix_response = self.network_client.get_distance_matrix(payload.depot_id, spbu_ids)
+        except NetworkDataError as exc:
+            raise ValueError(
+                f"Distance matrix from SPBU network master data is unavailable for depot {payload.depot_id}: {exc}"
+            ) from exc
         matrix_positions = {name: index for index, name in enumerate(time_matrix_response.nodes)}
 
         if config.soft_constraints.capacity_limit or not config.hard_constraints.capacity_limit:
@@ -333,23 +397,34 @@ class PreprocessingService:
         route_nodes = list(shipments)
         reload_node_count = self._estimate_reload_node_count(shipments, available_trucks)
         if reload_node_count > 0:
-            for reload_number in range(1, reload_node_count + 1):
-                route_nodes.append(
-                    RouteNode(
-                        node_index=len(route_nodes) + 1,
-                        node_kind="reload",
-                        order_id=f"DEPOT_RELOAD#{reload_number}",
-                        parent_order_id="-",
-                        spbu_id=payload.depot_id,
-                        product_type="DEPOT_RELOAD",
-                        demand_kl=0.0,
-                        service_time_minutes=payload.depot_service_time_minutes,
-                        time_window_start=0,
-                        time_window_end=24 * 60 * 2,
-                        allowed_vehicle_indices=list(range(len(available_trucks))),
-                        matrix_node_name="DEPOT",
+            grouped_vehicle_indices = self._group_reload_vehicle_indices(available_trucks)
+            group_reload_counts = self._allocate_group_reload_counts(reload_node_count, grouped_vehicle_indices)
+            reload_number = 0
+            for (vehicle_indices, capacity_kl, compartment_count), group_count in zip(
+                grouped_vehicle_indices,
+                group_reload_counts,
+                strict=False,
+            ):
+                for _ in range(group_count):
+                    reload_number += 1
+                    route_nodes.append(
+                        RouteNode(
+                            node_index=len(route_nodes) + 1,
+                            node_kind="reload",
+                            order_id=f"DEPOT_RELOAD#{reload_number}",
+                            parent_order_id="-",
+                            spbu_id=payload.depot_id,
+                            product_type="DEPOT_RELOAD",
+                            demand_kl=0.0,
+                            service_time_minutes=payload.depot_service_time_minutes,
+                            time_window_start=0,
+                            time_window_end=24 * 60 * 2,
+                            allowed_vehicle_indices=vehicle_indices,
+                            matrix_node_name="DEPOT",
+                            reload_capacity_kl=capacity_kl,
+                            reload_compartment_count=compartment_count,
+                        )
                     )
-                )
 
         logger.info(
             "Preprocessed scenario with %s shipments, %s reload nodes, %s trucks, %s preassigned unserved orders",

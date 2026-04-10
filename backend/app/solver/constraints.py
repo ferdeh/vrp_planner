@@ -34,7 +34,8 @@ def apply_capacity_constraints(
         if detail is None:
             return 0
         if detail.node_kind == "reload":
-            return -max_capacity
+            reload_capacity = int(round(detail.reload_capacity_kl * 1000))
+            return -max(1, reload_capacity)
         return int(round(detail.demand_kl * 1000))
 
     demand_index = routing.RegisterUnaryTransitCallback(demand_callback)
@@ -56,7 +57,7 @@ def apply_capacity_constraints(
         if detail is None:
             return 0
         if detail.node_kind == "reload":
-            return -max_compartment_count
+            return -max(1, detail.reload_compartment_count)
         return 1
 
     compartment_usage_index = routing.RegisterUnaryTransitCallback(compartment_usage_callback)

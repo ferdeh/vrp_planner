@@ -102,6 +102,8 @@ class ScenarioRepository:
                 dispatch_date=row.dispatch_date,
                 depot_id=row.depot_id,
                 status=row.result.status if row.result else row.status,
+                total_demand=row.result.total_demand if row.result else 0,
+                total_delivered_demand=row.result.total_delivered_demand if row.result else 0,
                 active_truck_count=row.result.active_truck_count if row.result else 0,
                 total_cost=row.result.total_cost if row.result else 0,
                 total_distance=row.result.total_distance if row.result else 0,

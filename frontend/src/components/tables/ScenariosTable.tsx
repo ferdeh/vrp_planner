@@ -53,6 +53,8 @@ export function ScenariosTable({
               <th>Tanggal</th>
               <th>Depot</th>
               <th>Status</th>
+              <th>Total Demand</th>
+              <th>Total Served</th>
               <th>Truck Aktif</th>
               <th>Total Cost</th>
               <th>Total Distance</th>
@@ -79,6 +81,8 @@ export function ScenariosTable({
                     {statusLabel(item.status)}
                   </span>
                 </td>
+                <td>{formatNumber(item.total_demand)} KL</td>
+                <td>{formatNumber(item.total_delivered_demand)} KL</td>
                 <td>{item.active_truck_count}</td>
                 <td>{formatCurrency(item.total_cost)}</td>
                 <td>{formatNumber(item.total_distance)} km</td>
