@@ -32,6 +32,8 @@ Dokumen ini merangkum perilaku solver terbaru pada planner backend. Fokus utaman
 7. `Final objective refinement`
    Setelah coverage terbaik ditemukan, solver menjalankan refinement akhir sesuai urutan objective user.
 
+   Jika objective primer jatuh ke `minimize_depot_operation`, refinement ini juga mendorong span operasi depot aktual menjadi serapat mungkin agar truck pertama tidak terlalu cepat masuk loading dan truck terakhir tidak terlalu lama menutup operasi depot.
+
 ## Peran Allow unserved
 
 - `Allow unserved = false`

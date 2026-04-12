@@ -205,6 +205,10 @@ Bagian ini ditujukan sebagai petunjuk user operasional saat mengisi form optimis
   Arti: mendorong solver memakai jumlah truck aktif sesedikit mungkin.
   Kapan dipakai: saat target utama adalah efisiensi armada dan pengurangan jumlah kendaraan keluar depot.
 
+- `Minimize depot operation time`
+  Arti: mendorong solver merapatkan span operasi depot dari truck pertama mulai loading sampai truck terakhir selesai aktivitas depot.
+  Kapan dipakai: saat target utama adalah memperpendek jam sibuk depot dan antrean loading.
+
 - `Minimize distance`
   Arti: mendorong solver memilih kombinasi route dengan total km lebih kecil.
   Kapan dipakai: saat biaya perjalanan per km menjadi fokus utama.
@@ -276,6 +280,12 @@ Bagian ini ditujukan sebagai petunjuk user operasional saat mengisi form optimis
 
 ### Parameter penalty dan solver
 
+- `primary_objective`
+  Field turunan yang dikembalikan backend untuk menandai objective primer yang sedang aktif, terutama antara `minimize_truck_count` dan `minimize_depot_operation`.
+
+- `allow_unserved_fallback`
+  Field turunan yang dikembalikan backend untuk menandai apakah pipeline solver boleh turun ke partial fallback. Nilainya mengikuti `soft_constraints.allow_unserved_orders`.
+
 - `unserved_order_penalty`
   Penalti untuk setiap shipment yang tidak terlayani saat `Allow unserved` aktif. Order priority hanya boleh memakai rule ini bila `SPBU Priority` tidak aktif sebagai hard maupun soft.
 
@@ -302,6 +312,9 @@ Bagian ini ditujukan sebagai petunjuk user operasional saat mengisi form optimis
 
 - `time_weight`
   Biaya per menit perjalanan. Dipakai sekaligus pada objective solver dan perhitungan `total_cost` hasil.
+
+- `depot_operation_time_weight`
+  Bobot objective agar solver merapatkan waktu operasi depot saat objective `Minimize depot operation time` aktif.
 
 - `solver_options.max_solver_seconds`
   Batas waktu pencarian solver.
@@ -338,6 +351,8 @@ Urutan solve yang dipakai:
 
 - Tahap 7, `final objective refinement`
   Setelah coverage terbaik ditemukan, solver menjalankan refinement akhir untuk objective penuh seperti truck count, distance, time, dan depot operation time sesuai urutan prioritas user.
+
+Jika objective primer jatuh ke `Minimize depot operation time`, refinement akhir juga mendorong solver meminimalkan span operasi depot aktual, bukan hanya total waktu perjalanan truck.
 
 Artinya, objective seperti `Minimize truck count` atau `Minimize depot operation time` tidak boleh lagi mengalahkan target dasar untuk tetap mengirim order bila masih ada peluang operasional.
 
@@ -562,6 +577,19 @@ Catatan:
 - `GET /api/v1/settings`
 - `PUT /api/v1/settings`
 
+### Version
+
+- `GET /api/v1/version`
+
+Endpoint ini mengembalikan metadata git yang sedang dipakai app untuk `vrp_planner` dan `vrp_infa`, termasuk branch, commit hash, commit message, waktu commit, dan status dirty/clean.
+
+Jika backend berjalan di container, metadata bisa diambil dari salah satu sumber berikut:
+
+- mount repo git ke runtime container, lalu set `PLANNER_GIT_REPO_PATH` dan `INFRA_GIT_REPO_PATH`
+- inject metadata build lewat environment seperti `PLANNER_GIT_COMMIT_HASH`, `PLANNER_GIT_BRANCH`, `INFRA_GIT_COMMIT_HASH`, dan seterusnya
+
+Untuk local stack yang berjalan dari `vrp_infa`, repo ini menyediakan override [docker-compose.local.version.override.yml](/Users/ferdiansyahzulkarnain/Documents/my Dev/vrp_planner/docker-compose.local.version.override.yml) agar planner backend dapat membaca metadata git kedua repo tanpa perlu mengubah compose utama.
+
 ### Optimization
 
 - `POST /api/v1/optimize`
@@ -670,9 +698,18 @@ Catatan:
     }
   ],
   "optimization_config": {
+    "primary_objective": "minimize_truck_count",
+    "allow_unserved_fallback": true,
     "minimize_truck_count": true,
     "minimize_distance": true,
     "minimize_time": true,
+    "minimize_depot_operation_time": false,
+    "objective_priority": [
+      "minimize_truck_count",
+      "minimize_distance",
+      "minimize_time",
+      "minimize_depot_operation_time"
+    ],
     "hard_constraints": {
       "capacity_limit": true,
       "time_window": true,
@@ -705,7 +742,8 @@ Catatan:
       "capacity_violation_penalty": 0,
       "activation_cost_vehicle": 10000,
       "distance_weight": 1,
-      "time_weight": 1
+      "time_weight": 1,
+      "depot_operation_time_weight": 1
     },
     "solver_options": {
       "max_solver_seconds": 30,
@@ -714,7 +752,8 @@ Catatan:
     },
     "max_route_duration_minutes": null,
     "max_vehicle_working_time_minutes": 720,
-    "max_total_distance_per_vehicle_km": null
+    "max_total_distance_per_vehicle_km": null,
+    "max_lateness_minutes": null
   }
 }
 ```
