@@ -200,3 +200,141 @@ def test_preprocessing_fails_when_distance_matrix_is_unavailable_from_network_ma
         match="Distance matrix from SPBU network master data is unavailable for depot DPT001",
     ):
         service.preprocess(payload, payload.optimization_config)
+
+
+class _ConstantMatrixNetworkClient:
+    def get_time_matrix(self, _depot_id: str, spbu_ids: list[str]) -> schemas.MatrixResponse:
+        size = len(spbu_ids) + 1
+        matrix = [[0 for _ in range(size)] for _ in range(size)]
+        for index in range(1, size):
+            matrix[0][index] = 60
+            matrix[index][0] = 60
+        return schemas.MatrixResponse(nodes=["DEPOT", *spbu_ids], matrix=matrix)
+
+    def get_distance_matrix(self, _depot_id: str, spbu_ids: list[str]) -> schemas.MatrixResponse:
+        size = len(spbu_ids) + 1
+        matrix = [[0 for _ in range(size)] for _ in range(size)]
+        for index in range(1, size):
+            matrix[0][index] = 10
+            matrix[index][0] = 10
+        return schemas.MatrixResponse(nodes=["DEPOT", *spbu_ids], matrix=matrix)
+
+
+def test_preprocessing_builds_reload_slots_per_vehicle_from_working_horizon(
+    configured_modules,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        master_data_module,
+        "MOCK_SPBU",
+        [
+            {
+                "spbu_id": "SPBU001",
+                "name": "SPBU A",
+                "lat": -6.11,
+                "lng": 106.71,
+                "time_window_start": "06:00",
+                "time_window_end": "10:00",
+                "truck_category": 4,
+                "allowed_truck_types": ["SMALL"],
+            }
+        ],
+    )
+    monkeypatch.setitem(master_data_module.MOCK_DEPOTS[0], "time_window_start", "06:00")
+    monkeypatch.setitem(master_data_module.MOCK_DEPOTS[0], "time_window_end", "10:00")
+
+    payload = schemas.OptimizationRequest.model_validate(
+        {
+            "dispatch_date": "2026-02-10",
+            "depot_id": "DPT001",
+            "depot_service_time_minutes": 0,
+            "orders": [
+                {
+                    "order_id": f"ORD{index:03d}",
+                    "spbu_id": "SPBU001",
+                    "product_type": "PERTALITE",
+                    "demand_kl": 10,
+                    "priority": False,
+                    "eta": None,
+                    "service_time_minutes": 0,
+                    "time_window_start": "06:00",
+                    "time_window_end": "10:00",
+                }
+                for index in range(1, 9)
+            ],
+            "available_trucks": [
+                {
+                    "truck_id": f"TRK{index:03d}",
+                    "truck_type": "SMALL",
+                    "truck_category": 2,
+                    "capacity_kl": 10,
+                    "compartments": [{"compartment_id": "C1", "capacity_kl": 10}],
+                    "fixed_cost": 1000,
+                    "variable_cost_per_km": 10,
+                    "variable_cost_per_minute": 2,
+                    "start_depot_id": "DPT001",
+                    "end_depot_id": "DPT001",
+                    "shift_start": "06:00",
+                    "shift_end": "10:00",
+                    "compatible_product_types": ["PERTALITE"],
+                }
+                for index in range(1, 5)
+            ],
+            "optimization_config": {
+                "primary_objective": "minimize_truck_count",
+                "allow_unserved_fallback": True,
+                "minimize_truck_count": True,
+                "minimize_distance": True,
+                "minimize_time": True,
+                "minimize_depot_operation_time": False,
+                "objective_priority": [],
+                "hard_constraints": {
+                    "capacity_limit": True,
+                    "time_window": True,
+                    "priority_eta": True,
+                    "truck_category": True,
+                    "depot_operation_window": True,
+                    "max_route_duration": False,
+                    "max_vehicle_working_time": True,
+                    "max_total_distance_per_vehicle": False,
+                },
+                "soft_constraints": {
+                    "allow_unserved_orders": True,
+                    "allow_overtime": True,
+                    "priority_eta": False,
+                    "truck_category": False,
+                    "depot_operation_window": False,
+                },
+                "penalties": {
+                    "unserved_order_penalty": 100000,
+                    "late_arrival_penalty_per_minute": 100,
+                    "priority_eta_penalty_per_minute": 200,
+                    "overtime_penalty_per_minute": 50,
+                    "depot_operation_window_penalty_per_minute": 50,
+                    "capacity_violation_penalty": 0,
+                    "activation_cost_vehicle": 10000,
+                    "distance_weight": 1,
+                    "time_weight": 1,
+                    "depot_operation_time_weight": 1,
+                },
+                "solver_options": {
+                    "max_solver_seconds": 10,
+                    "first_solution_strategy": "PARALLEL_CHEAPEST_INSERTION",
+                    "local_search_metaheuristic": "GUIDED_LOCAL_SEARCH",
+                },
+                "max_route_duration_minutes": None,
+                "max_vehicle_working_time_minutes": 240,
+                "max_total_distance_per_vehicle_km": None,
+                "max_lateness_minutes": None,
+            },
+        }
+    )
+
+    problem = PreprocessingService(network_client=_ConstantMatrixNetworkClient()).preprocess(
+        payload,
+        payload.optimization_config,
+    )
+
+    assert len(problem.shipments) == 8
+    assert len(problem.reload_nodes) == 4
+    assert all(node.reload_trip_number == 2 for node in problem.reload_nodes)

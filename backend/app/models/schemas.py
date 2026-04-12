@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from enum import Enum
 from typing import Any, Literal
 from uuid import UUID
 
@@ -35,6 +36,11 @@ SUPPORTED_OBJECTIVE_KEYS = [
     "minimize_time",
     "minimize_depot_operation_time",
 ]
+
+
+class PrimaryObjective(str, Enum):
+    MINIMIZE_DEPOT_OPERATION = "minimize_depot_operation"
+    MINIMIZE_TRUCK_COUNT = "minimize_truck_count"
 
 
 class SPBUData(BaseModel):
@@ -207,6 +213,8 @@ class SolverOptions(BaseModel):
 
 
 class OptimizationConfig(BaseModel):
+    primary_objective: PrimaryObjective = PrimaryObjective.MINIMIZE_TRUCK_COUNT
+    allow_unserved_fallback: bool = True
     minimize_truck_count: bool = True
     minimize_distance: bool = True
     minimize_time: bool = True
@@ -231,6 +239,17 @@ class OptimizationConfig(BaseModel):
             if item not in normalized:
                 normalized.append(item)
         self.objective_priority = normalized
+        ranked_primary = [
+            item
+            for item in self.objective_priority
+            if item in {"minimize_truck_count", "minimize_depot_operation_time"} and getattr(self, item, False)
+        ]
+        if ranked_primary and ranked_primary[0] == "minimize_depot_operation_time":
+            self.primary_objective = PrimaryObjective.MINIMIZE_DEPOT_OPERATION
+        elif ranked_primary:
+            self.primary_objective = PrimaryObjective.MINIMIZE_TRUCK_COUNT
+
+        self.allow_unserved_fallback = bool(self.soft_constraints.allow_unserved_orders)
         return self
 
 

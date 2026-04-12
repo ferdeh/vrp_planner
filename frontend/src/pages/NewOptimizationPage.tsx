@@ -482,25 +482,13 @@ export function NewOptimizationPage() {
   };
 
   const activeObjectives = previewRequest
-      ? (previewRequest.optimization_config.objective_priority ?? [])
-          .map((key) => {
-            if (!previewRequest.optimization_config[key as keyof typeof previewRequest.optimization_config]) {
-              return null;
-            }
-            switch (key) {
-              case "minimize_truck_count":
-                return "Minimize truck count";
-              case "minimize_distance":
-                return "Minimize distance";
-              case "minimize_time":
-                return "Minimize truck time";
-              case "minimize_depot_operation_time":
-                return "Minimize depot operation time";
-              default:
-                return null;
-            }
-          })
-          .filter(Boolean)
+    ? [
+        previewRequest.optimization_config.primary_objective === "minimize_depot_operation"
+          ? "Primary objective: Minimize depot operation"
+          : "Primary objective: Minimize truck count",
+        previewRequest.optimization_config.minimize_distance ? "Tie-breaker: Minimize distance" : null,
+        previewRequest.optimization_config.minimize_time ? "Tie-breaker: Minimize truck time" : null,
+      ].filter(Boolean)
     : [];
 
   const activeHardConstraints = previewRequest

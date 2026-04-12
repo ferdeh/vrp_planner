@@ -16,6 +16,121 @@ from app.solver.ortools_solver import OrToolsSolver
 from app.utils.time_utils import hhmm_to_minutes
 
 
+class _ConstantMatrixNetworkClient:
+    def get_time_matrix(self, _depot_id: str, spbu_ids: list[str]) -> schemas.MatrixResponse:
+        size = len(spbu_ids) + 1
+        matrix = [[0 for _ in range(size)] for _ in range(size)]
+        for index in range(1, size):
+            matrix[0][index] = 30
+            matrix[index][0] = 30
+        for row in range(1, size):
+            for column in range(1, size):
+                if row != column:
+                    matrix[row][column] = 60
+        return schemas.MatrixResponse(nodes=["DEPOT", *spbu_ids], matrix=matrix)
+
+    def get_distance_matrix(self, _depot_id: str, spbu_ids: list[str]) -> schemas.MatrixResponse:
+        size = len(spbu_ids) + 1
+        matrix = [[0 for _ in range(size)] for _ in range(size)]
+        for index in range(1, size):
+            matrix[0][index] = 10
+            matrix[index][0] = 10
+        for row in range(1, size):
+            for column in range(1, size):
+                if row != column:
+                    matrix[row][column] = 20
+        return schemas.MatrixResponse(nodes=["DEPOT", *spbu_ids], matrix=matrix)
+
+
+def _build_mode_comparison_payload(primary_objective: str) -> schemas.OptimizationRequest:
+    return schemas.OptimizationRequest.model_validate(
+        {
+            "dispatch_date": "2026-02-10",
+            "depot_id": "DPT001",
+            "depot_service_time_minutes": 0,
+            "orders": [
+                {
+                    "order_id": f"ORD{index:03d}",
+                    "spbu_id": f"SPBU{index:03d}",
+                    "product_type": "PERTALITE",
+                    "demand_kl": 10,
+                    "priority": False,
+                    "eta": None,
+                    "service_time_minutes": 0,
+                    "time_window_start": "06:00",
+                    "time_window_end": "10:00",
+                }
+                for index in range(1, 9)
+            ],
+            "available_trucks": [
+                {
+                    "truck_id": f"TRK{index:03d}",
+                    "truck_type": "SMALL",
+                    "truck_category": 2,
+                    "capacity_kl": 10,
+                    "compartments": [{"compartment_id": "C1", "capacity_kl": 10}],
+                    "fixed_cost": 1000,
+                    "variable_cost_per_km": 10,
+                    "variable_cost_per_minute": 2,
+                    "start_depot_id": "DPT001",
+                    "end_depot_id": "DPT001",
+                    "shift_start": "06:00",
+                    "shift_end": "10:00",
+                    "compatible_product_types": ["PERTALITE"],
+                }
+                for index in range(1, 5)
+            ],
+            "optimization_config": {
+                "primary_objective": primary_objective,
+                "allow_unserved_fallback": False,
+                "minimize_truck_count": primary_objective == "minimize_truck_count",
+                "minimize_distance": True,
+                "minimize_time": True,
+                "minimize_depot_operation_time": primary_objective == "minimize_depot_operation",
+                "objective_priority": [],
+                "hard_constraints": {
+                    "capacity_limit": True,
+                    "time_window": True,
+                    "priority_eta": True,
+                    "truck_category": True,
+                    "depot_operation_window": True,
+                    "max_route_duration": False,
+                    "max_vehicle_working_time": True,
+                    "max_total_distance_per_vehicle": False,
+                },
+                "soft_constraints": {
+                    "allow_unserved_orders": False,
+                    "allow_overtime": False,
+                    "priority_eta": False,
+                    "truck_category": False,
+                    "depot_operation_window": False,
+                },
+                "penalties": {
+                    "unserved_order_penalty": 100000,
+                    "late_arrival_penalty_per_minute": 100,
+                    "priority_eta_penalty_per_minute": 200,
+                    "overtime_penalty_per_minute": 50,
+                    "depot_operation_window_penalty_per_minute": 50,
+                    "capacity_violation_penalty": 0,
+                    "activation_cost_vehicle": 10000,
+                    "distance_weight": 1,
+                    "time_weight": 1,
+                    "depot_operation_time_weight": 1,
+                },
+                "solver_options": {
+                    "max_solver_seconds": 10,
+                    "first_solution_strategy": "PARALLEL_CHEAPEST_INSERTION",
+                    "local_search_metaheuristic": "GUIDED_LOCAL_SEARCH",
+                },
+                "max_route_duration_minutes": None,
+                "max_vehicle_working_time_minutes": 240,
+                "max_total_distance_per_vehicle_km": None,
+                "max_lateness_minutes": None,
+            },
+        }
+    )
+
+
 def test_solver_returns_feasible_basic_case(configured_modules, sample_payload):
     payload = schemas.OptimizationRequest.model_validate(sample_payload)
     problem = PreprocessingService().preprocess(payload, payload.optimization_config)
@@ -2436,3 +2551,85 @@ def test_depot_operation_end_uses_last_gate_out_not_return_eta():
     assert operation_start == "06:00"
     assert operation_end == "13:30"
     assert total_minutes == 450
+
+
+def test_solver_depot_mode_uses_all_trucks_and_finishes_earlier(configured_modules, monkeypatch):
+    monkeypatch.setattr(
+        master_data_module,
+        "MOCK_SPBU",
+        [
+            {
+                "spbu_id": f"SPBU{index:03d}",
+                "name": f"SPBU {index}",
+                "lat": -6.11,
+                "lng": 106.71,
+                "time_window_start": "06:00",
+                "time_window_end": "10:00",
+                "truck_category": 4,
+                "allowed_truck_types": ["SMALL"],
+            }
+            for index in range(1, 9)
+        ],
+    )
+    monkeypatch.setitem(master_data_module.MOCK_DEPOTS[0], "gate_limit", 10)
+    monkeypatch.setitem(master_data_module.MOCK_DEPOTS[0], "time_window_start", "06:00")
+    monkeypatch.setitem(master_data_module.MOCK_DEPOTS[0], "time_window_end", "10:00")
+
+    payload = _build_mode_comparison_payload("minimize_depot_operation")
+    problem = PreprocessingService(network_client=_ConstantMatrixNetworkClient()).preprocess(
+        payload,
+        payload.optimization_config,
+    )
+    result = ResultService().build_response(
+        "00000000-0000-0000-0000-000000000201",
+        problem,
+        OrToolsSolver().solve(problem),
+    )
+
+    assert result.status == "feasible"
+    assert result.total_unserved_orders == 0
+    assert result.active_truck_count == 4
+    assert len(result.route_details) == 4
+    assert all(route.trip_count == 2 for route in result.route_details)
+    assert max(hhmm_to_minutes(route.return_eta) for route in result.route_details if route.return_eta) == 480
+
+
+def test_solver_truck_count_mode_reduces_active_trucks_with_deeper_multi_trip(configured_modules, monkeypatch):
+    monkeypatch.setattr(
+        master_data_module,
+        "MOCK_SPBU",
+        [
+            {
+                "spbu_id": f"SPBU{index:03d}",
+                "name": f"SPBU {index}",
+                "lat": -6.11,
+                "lng": 106.71,
+                "time_window_start": "06:00",
+                "time_window_end": "10:00",
+                "truck_category": 4,
+                "allowed_truck_types": ["SMALL"],
+            }
+            for index in range(1, 9)
+        ],
+    )
+    monkeypatch.setitem(master_data_module.MOCK_DEPOTS[0], "gate_limit", 10)
+    monkeypatch.setitem(master_data_module.MOCK_DEPOTS[0], "time_window_start", "06:00")
+    monkeypatch.setitem(master_data_module.MOCK_DEPOTS[0], "time_window_end", "10:00")
+
+    payload = _build_mode_comparison_payload("minimize_truck_count")
+    problem = PreprocessingService(network_client=_ConstantMatrixNetworkClient()).preprocess(
+        payload,
+        payload.optimization_config,
+    )
+    result = ResultService().build_response(
+        "00000000-0000-0000-0000-000000000202",
+        problem,
+        OrToolsSolver().solve(problem),
+    )
+
+    assert result.status == "feasible"
+    assert result.total_unserved_orders == 0
+    assert result.active_truck_count == 2
+    assert len(result.route_details) == 2
+    assert all(route.trip_count == 4 for route in result.route_details)
+    assert max(hhmm_to_minutes(route.return_eta) for route in result.route_details if route.return_eta) == 600

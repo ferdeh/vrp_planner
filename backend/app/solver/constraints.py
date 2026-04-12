@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 
 from ortools.constraint_solver import pywrapcp
 
+from app.models import schemas
 from app.services.preprocessing_service import PreprocessedProblem
 from app.solver.objective import effective_unserved_penalty, objective_priority_scale
 from app.utils.time_utils import hhmm_to_minutes
@@ -16,6 +17,12 @@ class TimeConstraintArtifacts:
     dimension: pywrapcp.RoutingDimension
     extra_objective_vars: list[pywrapcp.IntVar] = field(default_factory=list)
     extra_objective_weights: list[int] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class VehicleActivationPolicy:
+    force_active_vehicle_indices: tuple[int, ...] = ()
+    max_active_vehicles: int | None = None
 
 
 def apply_capacity_constraints(
@@ -152,6 +159,7 @@ def apply_time_constraints(
     depot_operation_active_vars: list[pywrapcp.IntVar] = []
     depot_operation_start_vars: list[pywrapcp.IntVar] = []
     depot_operation_end_vars: list[pywrapcp.IntVar] = []
+    route_end_vars: list[pywrapcp.IntVar] = []
     extra_objective_vars: list[pywrapcp.IntVar] = []
     extra_objective_weights: list[int] = []
     depot_operation_weight = max(
@@ -192,6 +200,7 @@ def apply_time_constraints(
         start_var.SetRange(shift_start, shift_end)
         routing.AddVariableMinimizedByFinalizer(start_var)
         routing.AddVariableMinimizedByFinalizer(end_var)
+        route_end_vars.append(end_var)
 
         if problem.depot_service_time_minutes > 0 and problem.depot_gate_limit > 0:
             service_start = solver.IntVar(
@@ -330,6 +339,16 @@ def apply_time_constraints(
                 "depot_gate_capacity",
             )
         )
+    if (
+        problem.config.primary_objective == schemas.PrimaryObjective.MINIMIZE_DEPOT_OPERATION
+        and problem.config.minimize_depot_operation_time
+        and depot_operation_weight > 0
+        and route_end_vars
+    ):
+        latest_route_end = solver.IntVar(0, horizon, "latest_route_end")
+        solver.Add(solver.MaxEquality(route_end_vars, latest_route_end))
+        extra_objective_vars.append(latest_route_end)
+        extra_objective_weights.append(max(1, depot_operation_weight * 100))
     if depot_operation_start_vars:
         depot_operation_active_count = solver.IntVar(
             0,
@@ -422,3 +441,25 @@ def apply_optional_visits(
         for vehicle_id in range(len(problem.trucks)):
             solver.Add(routing.NextVar(routing.Start(vehicle_id)) != reload_index)
             solver.Add(routing.NextVar(reload_index) != routing.End(vehicle_id))
+
+
+def apply_vehicle_activation_policy(
+    routing: pywrapcp.RoutingModel,
+    manager: pywrapcp.RoutingIndexManager,
+    problem: PreprocessedProblem,
+    policy: VehicleActivationPolicy | None,
+) -> None:
+    """Apply vehicle activation requirements for objective-specific solve modes."""
+
+    if policy is None:
+        return
+
+    solver = routing.solver()
+    if policy.max_active_vehicles is not None:
+        solver.Add(
+            solver.Sum([routing.ActiveVehicleVar(vehicle_id) for vehicle_id in range(len(problem.trucks))])
+            <= policy.max_active_vehicles
+        )
+
+    for vehicle_id in policy.force_active_vehicle_indices:
+        solver.Add(routing.ActiveVehicleVar(vehicle_id) == 1)

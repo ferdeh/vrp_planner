@@ -10,10 +10,12 @@ from app.models import schemas
 from app.services.preprocessing_service import PreprocessedProblem
 from app.solver.constraints import (
     TimeConstraintArtifacts,
+    VehicleActivationPolicy,
     apply_capacity_constraints,
     apply_distance_constraints,
     apply_optional_visits,
     apply_time_constraints,
+    apply_vehicle_activation_policy,
     apply_vehicle_compatibility,
 )
 from app.solver.objective import transit_cost, vehicle_fixed_cost
@@ -39,6 +41,7 @@ def build_routing_model_with_options(
     problem: PreprocessedProblem,
     *,
     include_soft_priority_eta_objective: bool = True,
+    activation_policy: VehicleActivationPolicy | None = None,
 ) -> BuiltModel:
     """Build routing model with optional objective toggles for multi-pass solving."""
 
@@ -77,6 +80,7 @@ def build_routing_model_with_options(
     time_dimension = time_artifacts.dimension
     apply_vehicle_compatibility(routing, manager, problem)
     apply_optional_visits(routing, manager, problem)
+    apply_vehicle_activation_policy(routing, manager, problem, activation_policy)
 
     return BuiltModel(
         manager=manager,

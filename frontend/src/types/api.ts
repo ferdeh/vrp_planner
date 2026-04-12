@@ -8,6 +8,7 @@ export type SolutionStatus =
   | "error";
 export type AnalysisLevel = "level_1" | "level_2";
 export type AnalysisStatus = "processing" | "completed" | "error";
+export type PrimaryObjective = "minimize_depot_operation" | "minimize_truck_count";
 
 export interface OrderInput {
   order_id: string;
@@ -107,6 +108,8 @@ export interface MasterEffectiveEdge {
 }
 
 export interface OptimizationConfig {
+  primary_objective: PrimaryObjective;
+  allow_unserved_fallback: boolean;
   minimize_truck_count: boolean;
   minimize_distance: boolean;
   minimize_time: boolean;

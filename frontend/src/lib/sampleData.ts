@@ -1,16 +1,13 @@
 import type { OptimizationRequest, OptimizationConfig } from "../types/api";
 
 export const defaultOptimizationConfig: OptimizationConfig = {
+  primary_objective: "minimize_truck_count",
+  allow_unserved_fallback: true,
   minimize_truck_count: true,
   minimize_distance: true,
   minimize_time: true,
-  minimize_depot_operation_time: true,
-  objective_priority: [
-    "minimize_truck_count",
-    "minimize_distance",
-    "minimize_time",
-    "minimize_depot_operation_time",
-  ],
+  minimize_depot_operation_time: false,
+  objective_priority: [],
   hard_constraints: {
     capacity_limit: true,
     time_window: true,

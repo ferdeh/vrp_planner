@@ -11,6 +11,7 @@ from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 from app.models import schemas
 from app.services.preprocessing_service import PreprocessedProblem
 from app.solver.model_builder import BuiltModel, build_routing_model_with_options
+from app.solver.constraints import VehicleActivationPolicy
 from app.utils.time_utils import hhmm_to_minutes
 
 logger = logging.getLogger(__name__)
@@ -177,6 +178,7 @@ class OrToolsSolver:
     def _optimization_config(problem: PreprocessedProblem) -> schemas.OptimizationConfig:
         config = problem.config.model_copy(deep=True)
         config.soft_constraints = config.soft_constraints.model_copy(update={"allow_unserved_orders": False})
+        config.allow_unserved_fallback = False
         return config
 
     @staticmethod
@@ -192,6 +194,7 @@ class OrToolsSolver:
     def _best_effort_config(problem: PreprocessedProblem) -> schemas.OptimizationConfig:
         config = problem.config.model_copy(deep=True)
         config.soft_constraints = config.soft_constraints.model_copy(update={"allow_unserved_orders": True})
+        config.allow_unserved_fallback = True
         config.penalties = config.penalties.model_copy(
             update={
                 "unserved_order_penalty": max(
@@ -210,7 +213,65 @@ class OrToolsSolver:
         config.minimize_time = False
         config.minimize_depot_operation_time = False
         config.soft_constraints = config.soft_constraints.model_copy(update={"allow_unserved_orders": False})
+        config.allow_unserved_fallback = False
         return config
+
+    @staticmethod
+    def _depot_refinement_config(problem: PreprocessedProblem) -> schemas.OptimizationConfig:
+        config = problem.config.model_copy(deep=True)
+        config.minimize_truck_count = False
+        config.minimize_depot_operation_time = True
+        config.soft_constraints = config.soft_constraints.model_copy(update={"allow_unserved_orders": False})
+        config.allow_unserved_fallback = False
+        return config
+
+    @staticmethod
+    def _truck_count_refinement_config(problem: PreprocessedProblem) -> schemas.OptimizationConfig:
+        config = problem.config.model_copy(deep=True)
+        config.minimize_truck_count = False
+        config.minimize_depot_operation_time = True
+        config.soft_constraints = config.soft_constraints.model_copy(update={"allow_unserved_orders": False})
+        config.allow_unserved_fallback = False
+        return config
+
+    @staticmethod
+    def _eligible_vehicle_indices(problem: PreprocessedProblem) -> list[int]:
+        shipment_counts = [0] * len(problem.trucks)
+        for shipment in problem.shipments:
+            for vehicle_index in shipment.allowed_vehicle_indices:
+                if 0 <= vehicle_index < len(shipment_counts):
+                    shipment_counts[vehicle_index] += 1
+        return [index for index, count in enumerate(shipment_counts) if count > 0]
+
+    @staticmethod
+    def _depot_mode_forced_vehicle_indices(problem: PreprocessedProblem) -> list[int]:
+        eligible = OrToolsSolver._eligible_vehicle_indices(problem)
+        if not eligible:
+            return []
+        target_count = min(len(eligible), len(problem.shipments))
+        ranked = OrToolsSolver._ranked_eligible_vehicle_indices(problem, eligible)
+        return sorted(ranked[:target_count])
+
+    @staticmethod
+    def _ranked_eligible_vehicle_indices(problem: PreprocessedProblem, eligible: list[int] | None = None) -> list[int]:
+        if eligible is None:
+            eligible = OrToolsSolver._eligible_vehicle_indices(problem)
+        return sorted(
+            eligible,
+            key=lambda index: (
+                -len([shipment for shipment in problem.shipments if index in shipment.allowed_vehicle_indices]),
+                -problem.trucks[index].capacity_kl,
+                index,
+            ),
+        )
+
+    @staticmethod
+    def _mode_activation_policy(problem: PreprocessedProblem) -> VehicleActivationPolicy | None:
+        if problem.config.primary_objective == schemas.PrimaryObjective.MINIMIZE_DEPOT_OPERATION:
+            forced = tuple(OrToolsSolver._depot_mode_forced_vehicle_indices(problem))
+            if forced:
+                return VehicleActivationPolicy(force_active_vehicle_indices=forced)
+        return None
 
     @staticmethod
     def _visited_shipment_ids(
@@ -244,6 +305,19 @@ class OrToolsSolver:
     ) -> int:
         visited_shipments = OrToolsSolver._visited_shipment_ids(problem, built_model, assignment)
         return len([shipment for shipment in problem.shipments if shipment.order_id not in visited_shipments])
+
+    @staticmethod
+    def _active_vehicle_count(
+        built_model: BuiltModel,
+        assignment: pywrapcp.Assignment,
+        vehicle_count: int,
+    ) -> int:
+        routing = built_model.routing
+        active_count = 0
+        for vehicle_id in range(vehicle_count):
+            if assignment.Value(routing.NextVar(routing.Start(vehicle_id))) != routing.End(vehicle_id):
+                active_count += 1
+        return active_count
 
     @staticmethod
     def _unserved_shipments(
@@ -495,6 +569,62 @@ class OrToolsSolver:
         return routes
 
     @staticmethod
+    def _build_balanced_full_service_routes(
+        problem: PreprocessedProblem,
+        active_vehicle_indices: list[int],
+    ) -> list[list[int]] | None:
+        routes = [[] for _ in problem.trucks]
+        active_set = set(active_vehicle_indices)
+        if not active_set:
+            return None
+
+        reload_nodes_by_vehicle: dict[int, list] = {}
+        for node in sorted(
+            problem.reload_nodes,
+            key=lambda item: (
+                item.reload_vehicle_index if item.reload_vehicle_index is not None else len(problem.trucks),
+                item.reload_trip_number if item.reload_trip_number is not None else 0,
+                item.node_index,
+            ),
+        ):
+            vehicle_index = node.reload_vehicle_index
+            if vehicle_index is None:
+                continue
+            reload_nodes_by_vehicle.setdefault(vehicle_index, []).append(node)
+
+        trip_counts = {vehicle_index: 0 for vehicle_index in active_vehicle_indices}
+        for shipment in sorted(
+            problem.shipments,
+            key=lambda item: (len(item.allowed_vehicle_indices), -item.demand_kl, item.node_index),
+        ):
+            candidates = [
+                vehicle_index
+                for vehicle_index in active_vehicle_indices
+                if vehicle_index in shipment.allowed_vehicle_indices
+            ]
+            if not candidates:
+                return None
+            chosen_vehicle = min(
+                candidates,
+                key=lambda vehicle_index: (
+                    trip_counts[vehicle_index],
+                    len(routes[vehicle_index]),
+                    vehicle_index,
+                ),
+            )
+            if trip_counts[chosen_vehicle] > 0:
+                reload_pool = reload_nodes_by_vehicle.get(chosen_vehicle, [])
+                if not reload_pool:
+                    return None
+                routes[chosen_vehicle].append(reload_pool.pop(0).node_index)
+            routes[chosen_vehicle].append(shipment.node_index)
+            trip_counts[chosen_vehicle] += 1
+
+        if any(trip_counts[vehicle_index] == 0 for vehicle_index in active_vehicle_indices):
+            return None
+        return routes
+
+    @staticmethod
     def _solve_from_manual_routes(
         problem: PreprocessedProblem,
         routes: list[list[int]],
@@ -502,10 +632,12 @@ class OrToolsSolver:
         time_limit_seconds: int,
         include_soft_priority_eta_objective: bool,
         local_search_metaheuristic: str | None = None,
+        activation_policy: VehicleActivationPolicy | None = None,
     ) -> StageSolveResult:
         built_model = build_routing_model_with_options(
             problem,
             include_soft_priority_eta_objective=include_soft_priority_eta_objective,
+            activation_policy=activation_policy,
         )
         search_parameters = OrToolsSolver._build_search_parameters(
             problem,
@@ -608,10 +740,12 @@ class OrToolsSolver:
         time_limit_seconds: int,
         include_soft_priority_eta_objective: bool,
         local_search_metaheuristic: str | None = None,
+        activation_policy: VehicleActivationPolicy | None = None,
     ) -> StageSolveResult:
         built_model = build_routing_model_with_options(
             problem,
             include_soft_priority_eta_objective=include_soft_priority_eta_objective,
+            activation_policy=activation_policy,
         )
         search_parameters = self._build_search_parameters(
             problem,
@@ -635,10 +769,12 @@ class OrToolsSolver:
         time_limit_seconds: int,
         include_soft_priority_eta_objective: bool,
         local_search_metaheuristic: str | None = None,
+        activation_policy: VehicleActivationPolicy | None = None,
     ) -> StageSolveResult:
         built_model = build_routing_model_with_options(
             problem,
             include_soft_priority_eta_objective=include_soft_priority_eta_objective,
+            activation_policy=activation_policy,
         )
         search_parameters = self._build_search_parameters(
             problem,
@@ -667,6 +803,7 @@ class OrToolsSolver:
         seed_assignment: pywrapcp.Assignment,
         current_unserved: int,
         time_limit_seconds: int,
+        activation_policy: VehicleActivationPolicy | None = None,
     ) -> tuple[BuiltModel, pywrapcp.Assignment, int] | None:
         if time_limit_seconds <= 0 or current_unserved <= 0:
             return None
@@ -696,6 +833,7 @@ class OrToolsSolver:
                 time_limit_seconds=attempt_seconds,
                 include_soft_priority_eta_objective=False,
                 local_search_metaheuristic=self._repair_metaheuristic(problem),
+                activation_policy=activation_policy,
             )
             if attempt.assignment is None:
                 continue
@@ -724,6 +862,7 @@ class OrToolsSolver:
         seed_assignment: pywrapcp.Assignment,
         current_unserved: int,
         time_limit_seconds: int,
+        activation_policy: VehicleActivationPolicy | None = None,
     ) -> tuple[BuiltModel, pywrapcp.Assignment, int] | None:
         if time_limit_seconds <= 0 or current_unserved <= 0:
             return None
@@ -758,6 +897,7 @@ class OrToolsSolver:
                 time_limit_seconds=attempt_seconds,
                 include_soft_priority_eta_objective=False,
                 local_search_metaheuristic=metaheuristic,
+                activation_policy=activation_policy,
             )
             if attempt.assignment is None:
                 continue
@@ -788,6 +928,7 @@ class OrToolsSolver:
                     time_limit_seconds=max(1, time_limit_seconds),
                     include_soft_priority_eta_objective=False,
                     local_search_metaheuristic="SIMULATED_ANNEALING",
+                    activation_policy=activation_policy,
                 )
                 if manual_attempt.assignment is not None:
                     manual_unserved = self._count_unserved_shipments(
@@ -813,6 +954,7 @@ class OrToolsSolver:
         total_seconds: int,
         best_effort_prefix: str | None = None,
     ) -> SolverOutput:
+        activation_policy = self._mode_activation_policy(problem)
         service_problem = self._problem_with_config(problem, self._partial_service_config(problem))
         quality_problem = self._problem_with_config(problem, self._optimization_config(problem))
         service_seconds, repair_seconds, cleanup_seconds, quality_seconds, full_seconds = self._allocate_best_effort_budgets(
@@ -823,6 +965,7 @@ class OrToolsSolver:
             service_problem,
             time_limit_seconds=service_seconds,
             include_soft_priority_eta_objective=False,
+            activation_policy=activation_policy,
         )
         if service_result.assignment is None:
             runtime = time.perf_counter() - started
@@ -851,6 +994,7 @@ class OrToolsSolver:
                 time_limit_seconds=repair_seconds,
                 include_soft_priority_eta_objective=False,
                 local_search_metaheuristic=self._repair_metaheuristic(problem),
+                activation_policy=activation_policy,
             )
             if repair_result.assignment is not None:
                 repair_unserved = self._count_unserved_shipments(
@@ -873,6 +1017,7 @@ class OrToolsSolver:
                 seed_assignment=best_assignment,
                 current_unserved=best_unserved,
                 time_limit_seconds=targeted_cleanup_seconds,
+                activation_policy=activation_policy,
             )
             if cleanup_result is not None:
                 best_model, best_assignment, best_unserved = cleanup_result
@@ -887,6 +1032,7 @@ class OrToolsSolver:
                 seed_assignment=best_assignment,
                 current_unserved=best_unserved,
                 time_limit_seconds=forced_cleanup_seconds,
+                activation_policy=activation_policy,
             )
             if forced_cleanup_result is not None:
                 best_model, best_assignment, best_unserved = forced_cleanup_result
@@ -899,6 +1045,7 @@ class OrToolsSolver:
                 seed_assignment=best_assignment,
                 time_limit_seconds=quality_seconds,
                 include_soft_priority_eta_objective=quality_problem.config.soft_constraints.priority_eta,
+                activation_policy=activation_policy,
             )
             if optimize_result.assignment is not None:
                 optimize_unserved = self._count_unserved_shipments(
@@ -919,6 +1066,7 @@ class OrToolsSolver:
                 seed_assignment=best_assignment,
                 time_limit_seconds=full_seconds,
                 include_soft_priority_eta_objective=problem.config.soft_constraints.priority_eta,
+                activation_policy=activation_policy,
             )
             if cost_result.assignment is not None:
                 cost_unserved = self._count_unserved_shipments(
@@ -965,7 +1113,7 @@ class OrToolsSolver:
             search_status=routing_enums_pb2.RoutingSearchStatus.ROUTING_SUCCESS,
         )
 
-    def _run_full_service_pipeline(
+    def _run_full_service_depot_pipeline(
         self,
         problem: PreprocessedProblem,
         *,
@@ -973,14 +1121,29 @@ class OrToolsSolver:
         total_seconds: int,
     ) -> SolverOutput:
         strict_problem = self._problem_with_config(problem, self._full_service_config(problem))
-        optimize_problem = self._problem_with_config(problem, self._optimization_config(problem))
+        optimize_problem = self._problem_with_config(problem, self._depot_refinement_config(problem))
         strict_seconds, optimize_seconds = self._allocate_full_service_budgets(total_seconds)
+        activation_policy = self._mode_activation_policy(problem)
 
         strict_result = self._solve_stage(
             strict_problem,
             time_limit_seconds=strict_seconds,
             include_soft_priority_eta_objective=False,
+            activation_policy=activation_policy,
         )
+        if strict_result.assignment is None and activation_policy is not None:
+            manual_routes = self._build_balanced_full_service_routes(
+                strict_problem,
+                list(activation_policy.force_active_vehicle_indices),
+            )
+            if manual_routes is not None:
+                strict_result = self._solve_from_manual_routes(
+                    strict_problem,
+                    manual_routes,
+                    time_limit_seconds=strict_seconds,
+                    include_soft_priority_eta_objective=False,
+                    activation_policy=activation_policy,
+                )
         if strict_result.assignment is None:
             runtime = time.perf_counter() - started
             return SolverOutput(
@@ -1007,6 +1170,7 @@ class OrToolsSolver:
             seed_assignment=strict_result.assignment,
             time_limit_seconds=optimize_seconds,
             include_soft_priority_eta_objective=optimize_problem.config.soft_constraints.priority_eta,
+            activation_policy=activation_policy,
         )
         runtime = time.perf_counter() - started
         if optimize_result.assignment is not None:
@@ -1025,6 +1189,120 @@ class OrToolsSolver:
             search_status=routing_enums_pb2.RoutingSearchStatus.ROUTING_SUCCESS,
         )
 
+    def _run_full_service_min_truck_pipeline(
+        self,
+        problem: PreprocessedProblem,
+        *,
+        started: float,
+        total_seconds: int,
+    ) -> SolverOutput:
+        strict_problem = self._problem_with_config(problem, self._full_service_config(problem))
+        strict_seconds = max(1, int(round(total_seconds * 0.3)))
+        search_seconds = max(1, total_seconds - strict_seconds)
+        ranked_eligible = self._ranked_eligible_vehicle_indices(problem)
+
+        strict_result = self._solve_stage(
+            strict_problem,
+            time_limit_seconds=strict_seconds,
+            include_soft_priority_eta_objective=False,
+        )
+        if strict_result.assignment is None and ranked_eligible:
+            best_seed_result: StageSolveResult | None = None
+            seed_attempt_seconds = max(1, search_seconds // max(1, len(ranked_eligible)))
+            for candidate_active_count in range(1, len(ranked_eligible) + 1):
+                candidate_vehicle_indices = ranked_eligible[:candidate_active_count]
+                manual_routes = self._build_balanced_full_service_routes(strict_problem, candidate_vehicle_indices)
+                if manual_routes is None:
+                    continue
+                candidate_policy = VehicleActivationPolicy(max_active_vehicles=candidate_active_count)
+                seed_result = self._solve_from_manual_routes(
+                    strict_problem,
+                    manual_routes,
+                    time_limit_seconds=seed_attempt_seconds,
+                    include_soft_priority_eta_objective=False,
+                    activation_policy=candidate_policy,
+                )
+                if seed_result.assignment is not None:
+                    best_seed_result = seed_result
+                    break
+            if best_seed_result is not None:
+                strict_result = best_seed_result
+        if strict_result.assignment is None:
+            runtime = time.perf_counter() - started
+            return SolverOutput(
+                built_model=strict_result.built_model,
+                assignment=None,
+                runtime_seconds=runtime,
+                message=self._build_message(strict_result.search_status, None),
+                search_status=strict_result.search_status,
+            )
+
+        best_model = strict_result.built_model
+        best_assignment = strict_result.assignment
+        best_active_count = self._active_vehicle_count(best_model, best_assignment, len(problem.trucks))
+
+        if best_active_count > 1 and search_seconds > 0:
+            per_attempt_seconds = max(1, search_seconds // best_active_count)
+            for candidate_active_count in range(best_active_count - 1, 0, -1):
+                candidate_policy = VehicleActivationPolicy(max_active_vehicles=candidate_active_count)
+                attempt = self._solve_stage(
+                    strict_problem,
+                    time_limit_seconds=per_attempt_seconds,
+                    include_soft_priority_eta_objective=False,
+                    activation_policy=candidate_policy,
+                )
+                if attempt.assignment is None:
+                    break
+                best_model = attempt.built_model
+                best_assignment = attempt.assignment
+                best_active_count = candidate_active_count
+
+        refine_problem = self._problem_with_config(problem, self._truck_count_refinement_config(problem))
+        refine_policy = VehicleActivationPolicy(max_active_vehicles=best_active_count)
+        refine_result = self._refine_stage(
+            refine_problem,
+            seed_model=best_model,
+            seed_assignment=best_assignment,
+            time_limit_seconds=max(1, total_seconds // 4),
+            include_soft_priority_eta_objective=refine_problem.config.soft_constraints.priority_eta,
+            activation_policy=refine_policy,
+        )
+        runtime = time.perf_counter() - started
+        if refine_result.assignment is not None:
+            return SolverOutput(
+                built_model=refine_result.built_model,
+                assignment=refine_result.assignment,
+                runtime_seconds=runtime,
+                message="Optimization finished after full-service solve, active-truck reduction, and seeded refinement.",
+                search_status=routing_enums_pb2.RoutingSearchStatus.ROUTING_SUCCESS,
+            )
+        return SolverOutput(
+            built_model=best_model,
+            assignment=best_assignment,
+            runtime_seconds=runtime,
+            message="Optimization finished after full-service solve and active-truck reduction.",
+            search_status=routing_enums_pb2.RoutingSearchStatus.ROUTING_SUCCESS,
+        )
+
+    def _run_full_service_pipeline(
+        self,
+        problem: PreprocessedProblem,
+        *,
+        started: float,
+        total_seconds: int,
+    ) -> SolverOutput:
+        if problem.config.primary_objective == schemas.PrimaryObjective.MINIMIZE_DEPOT_OPERATION:
+            return self._run_full_service_depot_pipeline(
+                problem,
+                started=started,
+                total_seconds=total_seconds,
+            )
+        return self._run_full_service_min_truck_pipeline(
+            problem,
+            started=started,
+            total_seconds=total_seconds,
+        )
+
     def solve(self, problem: PreprocessedProblem) -> SolverOutput:
         started = time.perf_counter()
         logger.info("Running OR-Tools with %s shipments and %s vehicles", len(problem.shipments), len(problem.trucks))
@@ -1040,7 +1318,7 @@ class OrToolsSolver:
         if strict_output.assignment is not None:
             return strict_output
 
-        if not problem.config.soft_constraints.allow_unserved_orders:
+        if not problem.config.allow_unserved_fallback:
             return strict_output
 
         logger.info(

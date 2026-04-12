@@ -35,6 +35,8 @@ class RouteNode:
     priority_eta_minutes: int | None = None
     reload_capacity_kl: float = 0.0
     reload_compartment_count: int = 0
+    reload_vehicle_index: int | None = None
+    reload_trip_number: int | None = None
 
 
 @dataclass
@@ -86,90 +88,122 @@ class PreprocessingService:
         self.master_data_client = master_data_client or MasterDataClient()
         self.network_client = network_client or NetworkClient(self.master_data_client)
 
-    def _estimate_reload_node_count(
+    def _vehicle_compatible_shipments(
         self,
         shipments: list[RouteNode],
-        available_trucks: list[schemas.TruckInput],
+        vehicle_index: int,
+    ) -> list[RouteNode]:
+        return [shipment for shipment in shipments if vehicle_index in shipment.allowed_vehicle_indices]
+
+    def _estimate_vehicle_min_cycle_minutes(
+        self,
+        payload: schemas.OptimizationRequest,
+        truck: schemas.TruckInput,
+        compatible_shipments: list[RouteNode],
+        time_matrix: list[list[int]],
+        matrix_positions: dict[str, int],
     ) -> int:
-        """Estimate a realistic upper bound for depot reload opportunities."""
-
-        if not shipments or not available_trucks:
+        if not compatible_shipments:
             return 0
 
-        total_shipment_demand = sum(node.demand_kl for node in shipments)
-        total_initial_capacity = sum(truck.capacity_kl for truck in available_trucks)
-        extra_capacity_needed = max(0.0, round(total_shipment_demand - total_initial_capacity, 6))
+        depot_index = matrix_positions["DEPOT"]
+        min_cycle_minutes: int | None = None
+        for shipment in compatible_shipments:
+            shipment_index = matrix_positions[shipment.matrix_node_name]
+            outbound = int(time_matrix[depot_index][shipment_index])
+            inbound = int(time_matrix[shipment_index][depot_index])
+            cycle_minutes = (
+                int(payload.depot_service_time_minutes)
+                + outbound
+                + int(shipment.service_time_minutes)
+                + inbound
+            )
+            if min_cycle_minutes is None or cycle_minutes < min_cycle_minutes:
+                min_cycle_minutes = cycle_minutes
 
-        smallest_reload_capacity = min(
-            (truck.capacity_kl for truck in available_trucks if truck.capacity_kl > 0),
-            default=0.0,
+        return max(1, min_cycle_minutes or 0)
+
+    def _estimate_vehicle_max_trip_count(
+        self,
+        payload: schemas.OptimizationRequest,
+        config: schemas.OptimizationConfig,
+        truck: schemas.TruckInput,
+        compatible_shipments: list[RouteNode],
+        time_matrix: list[list[int]],
+        matrix_positions: dict[str, int],
+    ) -> int:
+        if not compatible_shipments:
+            return 1
+
+        shift_start = hhmm_to_minutes(truck.shift_start)
+        shift_end = hhmm_to_minutes(truck.shift_end)
+        working_limit = (
+            shift_end
+            if not config.max_vehicle_working_time_minutes
+            else min(shift_end, shift_start + config.max_vehicle_working_time_minutes)
         )
-        capacity_based_reloads = 0
-        if extra_capacity_needed > 0:
-            if smallest_reload_capacity <= 0:
-                capacity_based_reloads = max(0, len(shipments) - 1)
-            else:
-                capacity_based_reloads = int(math.ceil(extra_capacity_needed / smallest_reload_capacity))
+        available_minutes = max(0, working_limit - shift_start)
+        if available_minutes <= 0:
+            return 1
 
-        total_initial_compartment_slots = sum(max(1, len(truck.compartments)) for truck in available_trucks)
-        slot_based_reloads = max(0, len(shipments) - total_initial_compartment_slots)
+        min_cycle_minutes = self._estimate_vehicle_min_cycle_minutes(
+            payload,
+            truck,
+            compatible_shipments,
+            time_matrix,
+            matrix_positions,
+        )
+        if min_cycle_minutes <= 0:
+            return 1
 
-        theoretical_reload_count = max(capacity_based_reloads, slot_based_reloads)
-        if theoretical_reload_count <= 0:
-            return 0
-        return max(1, min(len(shipments) - 1, theoretical_reload_count))
+        max_trip_count = max(1, available_minutes // min_cycle_minutes)
+        return max(1, min(len(compatible_shipments), max_trip_count))
 
-    def _group_reload_vehicle_indices(
+    def _build_vehicle_reload_nodes(
         self,
+        payload: schemas.OptimizationRequest,
+        config: schemas.OptimizationConfig,
+        shipments: list[RouteNode],
         available_trucks: list[schemas.TruckInput],
-    ) -> list[tuple[list[int], float, int]]:
-        grouped: dict[tuple[float, int], list[int]] = {}
-        for index, truck in enumerate(available_trucks):
-            key = (round(truck.capacity_kl, 6), max(1, len(truck.compartments)))
-            grouped.setdefault(key, []).append(index)
-        groups = [
-            (indices, capacity_kl, compartment_count)
-            for (capacity_kl, compartment_count), indices in grouped.items()
-        ]
-        return sorted(groups, key=lambda item: (item[1], item[2], item[0][0]))
-
-    def _allocate_group_reload_counts(
-        self,
-        reload_node_count: int,
-        grouped_vehicle_indices: list[tuple[list[int], float, int]],
-    ) -> list[int]:
-        if reload_node_count <= 0 or not grouped_vehicle_indices:
-            return []
-        if len(grouped_vehicle_indices) == 1:
-            return [reload_node_count]
-
-        allocated = [0] * len(grouped_vehicle_indices)
-        remaining = reload_node_count
-        if reload_node_count <= len(grouped_vehicle_indices):
-            for group_index in range(reload_node_count):
-                allocated[group_index] = 1
-            return allocated
-
-        for group_index in range(len(grouped_vehicle_indices)):
-            allocated[group_index] = 1
-            remaining -= 1
-
-        total_trucks = sum(len(indices) for indices, _capacity, _compartments in grouped_vehicle_indices)
-        weighted_shares = [
-            (remaining * len(indices)) / max(1, total_trucks)
-            for indices, _capacity, _compartments in grouped_vehicle_indices
-        ]
-        for group_index, share in enumerate(weighted_shares):
-            bonus = int(math.floor(share))
-            allocated[group_index] += bonus
-            remaining -= bonus
-        while remaining > 0:
-            for group_index in range(len(allocated)):
-                if remaining <= 0:
-                    break
-                allocated[group_index] += 1
-                remaining -= 1
-        return allocated
+        time_matrix: list[list[int]],
+        matrix_positions: dict[str, int],
+        starting_node_index: int,
+    ) -> list[RouteNode]:
+        reload_nodes: list[RouteNode] = []
+        next_node_index = starting_node_index
+        for vehicle_index, truck in enumerate(available_trucks):
+            compatible_shipments = self._vehicle_compatible_shipments(shipments, vehicle_index)
+            max_trip_count = self._estimate_vehicle_max_trip_count(
+                payload,
+                config,
+                truck,
+                compatible_shipments,
+                time_matrix,
+                matrix_positions,
+            )
+            for trip_number in range(2, max_trip_count + 1):
+                next_node_index += 1
+                reload_nodes.append(
+                    RouteNode(
+                        node_index=next_node_index,
+                        node_kind="reload",
+                        order_id=f"DEPOT_RELOAD#{truck.truck_id}#{trip_number}",
+                        parent_order_id="-",
+                        spbu_id=payload.depot_id,
+                        product_type="DEPOT_RELOAD",
+                        demand_kl=0.0,
+                        service_time_minutes=payload.depot_service_time_minutes,
+                        time_window_start=0,
+                        time_window_end=24 * 60 * 2,
+                        allowed_vehicle_indices=[vehicle_index],
+                        matrix_node_name="DEPOT",
+                        reload_capacity_kl=truck.capacity_kl,
+                        reload_compartment_count=max(1, len(truck.compartments)),
+                        reload_vehicle_index=vehicle_index,
+                        reload_trip_number=trip_number,
+                    )
+                )
+        return reload_nodes
 
     def preprocess(
         self,
@@ -395,36 +429,17 @@ class PreprocessingService:
             )
 
         route_nodes = list(shipments)
-        reload_node_count = self._estimate_reload_node_count(shipments, available_trucks)
-        if reload_node_count > 0:
-            grouped_vehicle_indices = self._group_reload_vehicle_indices(available_trucks)
-            group_reload_counts = self._allocate_group_reload_counts(reload_node_count, grouped_vehicle_indices)
-            reload_number = 0
-            for (vehicle_indices, capacity_kl, compartment_count), group_count in zip(
-                grouped_vehicle_indices,
-                group_reload_counts,
-                strict=False,
-            ):
-                for _ in range(group_count):
-                    reload_number += 1
-                    route_nodes.append(
-                        RouteNode(
-                            node_index=len(route_nodes) + 1,
-                            node_kind="reload",
-                            order_id=f"DEPOT_RELOAD#{reload_number}",
-                            parent_order_id="-",
-                            spbu_id=payload.depot_id,
-                            product_type="DEPOT_RELOAD",
-                            demand_kl=0.0,
-                            service_time_minutes=payload.depot_service_time_minutes,
-                            time_window_start=0,
-                            time_window_end=24 * 60 * 2,
-                            allowed_vehicle_indices=vehicle_indices,
-                            matrix_node_name="DEPOT",
-                            reload_capacity_kl=capacity_kl,
-                            reload_compartment_count=compartment_count,
-                        )
-                    )
+        route_nodes.extend(
+            self._build_vehicle_reload_nodes(
+                payload,
+                config,
+                shipments,
+                available_trucks,
+                time_matrix_response.matrix,
+                matrix_positions,
+                len(route_nodes),
+            )
+        )
 
         logger.info(
             "Preprocessed scenario with %s shipments, %s reload nodes, %s trucks, %s preassigned unserved orders",

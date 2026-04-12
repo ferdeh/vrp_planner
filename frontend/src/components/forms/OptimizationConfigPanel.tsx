@@ -1,44 +1,4 @@
-import { useEffect, useRef, useState, type DragEvent } from "react";
-
-const objectiveItems = [
-  {
-    key: "minimize_truck_count",
-    label: "Minimize truck count",
-    description: "Prioritaskan jumlah truck aktif minimum.",
-  },
-  {
-    key: "minimize_distance",
-    label: "Minimize distance",
-    description: "Gunakan biaya jarak pada objective.",
-  },
-  {
-    key: "minimize_time",
-    label: "Minimize truck time",
-    description: "Gunakan biaya waktu pada objective.",
-  },
-  {
-    key: "minimize_depot_operation_time",
-    label: "Minimize depot operation time",
-    description: "Dorong truck gate out lebih pagi dan menyelesaikan rute lebih cepat.",
-  },
-] as const;
-
-type ObjectiveKey = (typeof objectiveItems)[number]["key"];
-
-function normalizeObjectivePriority(priority: string[] | undefined): ObjectiveKey[] {
-  const normalized: ObjectiveKey[] = [];
-  for (const item of priority ?? []) {
-    if (objectiveItems.some((objective) => objective.key === item) && !normalized.includes(item as ObjectiveKey)) {
-      normalized.push(item as ObjectiveKey);
-    }
-  }
-  for (const item of objectiveItems) {
-    if (!normalized.includes(item.key)) {
-      normalized.push(item.key);
-    }
-  }
-  return normalized;
-}
+import { useEffect, useRef, useState } from "react";
 
 const hardItems = [
   { path: "capacity_limit", label: "Capacity limit", description: "Kapasitas truck wajib dipenuhi." },
@@ -68,9 +28,7 @@ const hardItems = [
   { path: "max_total_distance_per_vehicle", label: "Max distance per vehicle", description: "Batasi total km per kendaraan." },
 ] as const;
 
-const softItems = [
-  { path: "allow_unserved_orders", label: "Allow unserved", description: "Order boleh tidak terlayani dengan penalty." },
-] as const;
+const softItems = [] as const;
 
 const hardConstraintValueFieldMap: Record<string, { path: string; placeholder: string }> = {
   max_route_duration: {
@@ -196,8 +154,7 @@ export function OptimizationConfigPanel({
   };
   const hardConstraints = watch(`${prefix}.hard_constraints`) ?? {};
   const softConstraints = watch(`${prefix}.soft_constraints`) ?? {};
-  const watchedObjectivePriority = watch(`${prefix}.objective_priority`) as string[] | undefined;
-  const objectivePriority = normalizeObjectivePriority(watchedObjectivePriority);
+  const primaryObjective = watch(`${prefix}.primary_objective`) ?? "minimize_truck_count";
   const selectedFirstSolutionStrategy =
     watch(`${prefix}.solver_options.first_solution_strategy`) ?? "PATH_CHEAPEST_ARC";
   const selectedLocalSearchStrategy =
@@ -220,15 +177,21 @@ export function OptimizationConfigPanel({
   const [previewedStrategy, setPreviewedStrategy] = useState<string | null>(null);
   const [isLocalSearchMenuOpen, setIsLocalSearchMenuOpen] = useState(false);
   const [previewedLocalSearch, setPreviewedLocalSearch] = useState<string | null>(null);
-  const [draggedObjectiveKey, setDraggedObjectiveKey] = useState<ObjectiveKey | null>(null);
   const strategyMenuRef = useRef<HTMLDivElement | null>(null);
   const localSearchMenuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    if (JSON.stringify(watchedObjectivePriority ?? []) !== JSON.stringify(objectivePriority)) {
-      setValue(`${prefix}.objective_priority`, objectivePriority, { shouldDirty: false });
-    }
-  }, [objectivePriority, prefix, setValue, watchedObjectivePriority]);
+    setValue(`${prefix}.allow_unserved_fallback`, Boolean(softConstraints.allow_unserved_orders), { shouldDirty: false });
+  }, [prefix, setValue, softConstraints.allow_unserved_orders]);
+
+  useEffect(() => {
+    setValue(`${prefix}.minimize_truck_count`, primaryObjective === "minimize_truck_count", { shouldDirty: false });
+    setValue(
+      `${prefix}.minimize_depot_operation_time`,
+      primaryObjective === "minimize_depot_operation",
+      { shouldDirty: false },
+    );
+  }, [prefix, primaryObjective, setValue]);
 
   useEffect(() => {
     if (!availableHardItems.length) {
@@ -373,37 +336,6 @@ export function OptimizationConfigPanel({
   const selectedLocalSearchMeta =
     localSearchStrategies.find((item) => item.value === selectedLocalSearchStrategy) ??
     localSearchStrategies[0];
-  const orderedObjectiveItems = objectivePriority
-    .map((key) => objectiveItems.find((item) => item.key === key))
-    .filter((item): item is (typeof objectiveItems)[number] => Boolean(item));
-
-  const moveObjective = (sourceKey: ObjectiveKey, targetKey: ObjectiveKey) => {
-    if (sourceKey === targetKey) {
-      return;
-    }
-    const next = [...objectivePriority];
-    const sourceIndex = next.indexOf(sourceKey);
-    const targetIndex = next.indexOf(targetKey);
-    if (sourceIndex < 0 || targetIndex < 0) {
-      return;
-    }
-    next.splice(sourceIndex, 1);
-    next.splice(targetIndex, 0, sourceKey);
-    setValue(`${prefix}.objective_priority`, next, { shouldDirty: true });
-  };
-
-  const handleObjectiveDragStart = (objectiveKey: ObjectiveKey) => {
-    setDraggedObjectiveKey(objectiveKey);
-  };
-
-  const handleObjectiveDrop = (event: DragEvent<HTMLDivElement>, targetKey: ObjectiveKey) => {
-    event.preventDefault();
-    if (!draggedObjectiveKey) {
-      return;
-    }
-    moveObjective(draggedObjectiveKey, targetKey);
-    setDraggedObjectiveKey(null);
-  };
 
   return (
     <div className="space-y-8">
@@ -411,47 +343,77 @@ export function OptimizationConfigPanel({
         <div>
           <h3 className="text-lg font-semibold text-ink">Objective</h3>
           <p className="text-sm text-slate-500">
-            Drag kartu objective untuk mengatur prioritas solver. Urutan paling atas akan diprioritaskan lebih dulu.
+            Pilih satu objective utama setelah solver memastikan full service. Distance dan time tetap dipakai sebagai tie-breaker.
           </p>
         </div>
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {orderedObjectiveItems.map((item, index) => {
-            const isEnabled = Boolean(watch(`${prefix}.${item.key}`));
-            return (
-              <div
-                key={item.key}
-                draggable
-                onDragStart={() => handleObjectiveDragStart(item.key)}
-                onDragOver={(event) => event.preventDefault()}
-                onDrop={(event) => handleObjectiveDrop(event, item.key)}
-                onDragEnd={() => setDraggedObjectiveKey(null)}
-                className={`rounded-3xl border p-4 transition ${
-                  isEnabled
-                    ? "border-sky-200 bg-sky-50/70"
-                    : "border-slate-200 bg-slate-50"
-                } ${draggedObjectiveKey === item.key ? "opacity-60" : ""}`}
-              >
-                <div className="mb-3 flex items-center justify-between gap-3">
-                  <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-500 shadow-sm">
-                    Priority #{index + 1}
-                  </span>
-                  <span className="cursor-grab text-slate-400" aria-hidden="true">
-                    ⋮⋮
-                  </span>
-                </div>
-                <div className="flex gap-3">
-                  <input type="checkbox" className="checkbox mt-1" {...register(`${prefix}.${item.key}`)} />
-                  <div>
-                    <p className="font-semibold text-ink">{item.label}</p>
-                    <p className="text-sm text-slate-500">{item.description}</p>
-                    <p className="mt-2 text-xs text-slate-400">
-                      Geser kartu ini untuk menaikkan atau menurunkan prioritas objective.
-                    </p>
-                  </div>
-                </div>
+        <div className="grid gap-3 md:grid-cols-2">
+          <label className={`rounded-3xl border p-4 transition ${primaryObjective === "minimize_depot_operation" ? "border-sky-200 bg-sky-50/70" : "border-slate-200 bg-slate-50"}`}>
+            <div className="flex gap-3">
+              <input
+                type="radio"
+                value="minimize_depot_operation"
+                className="mt-1"
+                {...register(`${prefix}.primary_objective`)}
+              />
+              <div>
+                <p className="font-semibold text-ink">Minimize depot operation</p>
+                <p className="text-sm text-slate-500">
+                  Gunakan seluruh truck eligible dan selesaikan full service secepat mungkin. Multi-trip dipakai bila diperlukan.
+                </p>
               </div>
-            );
-          })}
+            </div>
+          </label>
+          <label className={`rounded-3xl border p-4 transition ${primaryObjective === "minimize_truck_count" ? "border-sky-200 bg-sky-50/70" : "border-slate-200 bg-slate-50"}`}>
+            <div className="flex gap-3">
+              <input
+                type="radio"
+                value="minimize_truck_count"
+                className="mt-1"
+                {...register(`${prefix}.primary_objective`)}
+              />
+              <div>
+                <p className="font-semibold text-ink">Minimize truck count</p>
+                <p className="text-sm text-slate-500">
+                  Cari jumlah truck aktif minimum untuk mencapai full service. Multi-trip dipakai lebih agresif.
+                </p>
+              </div>
+            </div>
+          </label>
+        </div>
+        <div className="grid gap-3 md:grid-cols-3">
+          <label className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
+            <div className="flex gap-3">
+              <input type="checkbox" className="checkbox mt-1" {...register(`${prefix}.minimize_distance`)} />
+              <div>
+                <p className="font-semibold text-ink">Minimize distance</p>
+                <p className="text-sm text-slate-500">Gunakan biaya jarak sebagai tie-breaker.</p>
+              </div>
+            </div>
+          </label>
+          <label className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
+            <div className="flex gap-3">
+              <input type="checkbox" className="checkbox mt-1" {...register(`${prefix}.minimize_time`)} />
+              <div>
+                <p className="font-semibold text-ink">Minimize truck time</p>
+                <p className="text-sm text-slate-500">Gunakan biaya waktu sebagai tie-breaker.</p>
+              </div>
+            </div>
+          </label>
+          <label className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
+            <div className="flex gap-3">
+              <input
+                type="checkbox"
+                className="checkbox mt-1"
+                {...register(`${prefix}.soft_constraints.allow_unserved_orders`)}
+              />
+              <div>
+                <p className="font-semibold text-ink">Allow unserved as last resort</p>
+                <p className="text-sm text-slate-500">
+                  Dipakai hanya bila solver gagal menemukan full-service di semua langkah optimasi.
+                </p>
+              </div>
+            </div>
+          </label>
         </div>
       </div>
 
