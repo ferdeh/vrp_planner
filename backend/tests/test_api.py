@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime, timezone
 
+from app.api.routes import version as version_route
 from app.models import schemas
 from app.services.scenario_analysis_service import _ExperimentRun, ScenarioAnalysisService
 
@@ -23,6 +25,47 @@ def test_settings_update_roundtrip(client):
     )
     assert update_response.status_code == 200
     assert update_response.json()["default_optimization_config"]["solver_options"]["max_solver_seconds"] == 42
+
+
+def test_version_endpoint_returns_repository_metadata(client, monkeypatch):
+    monkeypatch.setattr(
+        version_route,
+        "get_repository_versions",
+        lambda: schemas.RepositoryVersionResponse(
+            generated_at=datetime(2026, 4, 12, 2, 0, tzinfo=timezone.utc),
+            repositories=[
+                schemas.RepositoryVersionItem(
+                    key="vrp_planner",
+                    title="VRP Planner",
+                    repo_name="vrp_planner",
+                    branch="main",
+                    commit_hash="ff7269a5db68ffd8526a91f5e87f754adf4bb531",
+                    short_commit_hash="ff7269a",
+                    commit_message="Implement full-service solver pipeline and update docs",
+                    committed_at=datetime(2026, 4, 11, 6, 13, 20, tzinfo=timezone.utc),
+                    dirty=True,
+                    source="git",
+                ),
+                schemas.RepositoryVersionItem(
+                    key="vrp_infa",
+                    title="VRP Infra",
+                    repo_name="vrp_infa",
+                    available=False,
+                    source="unavailable",
+                    error="Git metadata tidak tersedia di runtime app.",
+                ),
+            ],
+        ),
+    )
+
+    response = client.get("/api/v1/version")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["repositories"][0]["key"] == "vrp_planner"
+    assert payload["repositories"][0]["short_commit_hash"] == "ff7269a"
+    assert payload["repositories"][0]["dirty"] is True
+    assert payload["repositories"][1]["available"] is False
 
 
 def test_optimize_endpoint_and_scenario_detail(client, sample_payload):

@@ -180,6 +180,26 @@ export interface SystemSettingsPayload {
   ui_preferences: Record<string, unknown>;
 }
 
+export interface RepositoryVersionItem {
+  key: string;
+  title: string;
+  repo_name: string;
+  branch: string | null;
+  commit_hash: string | null;
+  short_commit_hash: string | null;
+  commit_message: string | null;
+  committed_at: string | null;
+  dirty: boolean;
+  available: boolean;
+  source: "git" | "env" | "unavailable";
+  error: string | null;
+}
+
+export interface RepositoryVersionResponse {
+  generated_at: string;
+  repositories: RepositoryVersionItem[];
+}
+
 export interface TruckTypeSummary {
   truck_type: string;
   active_count: number;

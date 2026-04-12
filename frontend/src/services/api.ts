@@ -7,6 +7,7 @@ import type {
   OptimizationJobResponse,
   MasterDataListResponse,
   OptimizationRequest,
+  RepositoryVersionResponse,
   ScenarioAnalysisCreateRequest,
   ScenarioAnalysisDetailResponse,
   ScenarioAnalysisJobResponse,
@@ -41,6 +42,11 @@ export async function getSettings() {
 
 export async function updateSettings(payload: SystemSettingsPayload) {
   const { data } = await api.put<SystemSettingsResponse>("/api/v1/settings", payload);
+  return data;
+}
+
+export async function getRepositoryVersions() {
+  const { data } = await api.get<RepositoryVersionResponse>("/api/v1/version");
   return data;
 }
 

@@ -1,0 +1,8 @@
+services:
+  planner-backend:
+    environment:
+      PLANNER_GIT_REPO_PATH: /workspace/vrp_planner
+      INFRA_GIT_REPO_PATH: /workspace/vrp_infa
+    volumes:
+      - ../vrp_planner:/workspace/vrp_planner:ro
+      - ../vrp_infa:/workspace/vrp_infa:ro

@@ -7,6 +7,7 @@ const navigation = [
   { to: "/scenario-analysis", label: "Scenario Analysis" },
   { to: "/user-guide", label: "Panduan User" },
   { to: "/settings", label: "Settings" },
+  { to: "/version", label: "Version" },
 ];
 
 export function AppLayout({ children }: { children: React.ReactNode }) {

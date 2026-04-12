@@ -270,6 +270,26 @@ class SystemSettingsResponse(BaseModel):
     updated_at: datetime
 
 
+class RepositoryVersionItem(BaseModel):
+    key: str
+    title: str
+    repo_name: str
+    branch: str | None = None
+    commit_hash: str | None = None
+    short_commit_hash: str | None = None
+    commit_message: str | None = None
+    committed_at: datetime | None = None
+    dirty: bool = False
+    available: bool = True
+    source: Literal["git", "env", "unavailable"] = "git"
+    error: str | None = None
+
+
+class RepositoryVersionResponse(BaseModel):
+    generated_at: datetime
+    repositories: list[RepositoryVersionItem] = Field(default_factory=list)
+
+
 class PreprocessingNote(BaseModel):
     code: str
     message: str

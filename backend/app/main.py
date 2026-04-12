@@ -15,6 +15,7 @@ from app.api.routes.master_data_proxy import router as master_data_router
 from app.api.routes.optimization import router as optimization_router
 from app.api.routes.scenarios import router as scenario_router
 from app.api.routes.settings import router as settings_router
+from app.api.routes.version import router as version_router
 from app.core.config import get_settings
 from app.core.database import Base, get_engine
 from app.core.logging import configure_logging
@@ -67,6 +68,7 @@ def generic_error_handler(_: Request, exc: Exception) -> JSONResponse:
 app.include_router(health_router)
 app.include_router(auth_router)
 app.include_router(settings_router)
+app.include_router(version_router)
 app.include_router(optimization_router)
 app.include_router(scenario_router)
 app.include_router(master_data_router)
