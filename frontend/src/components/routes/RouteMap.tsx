@@ -13,8 +13,13 @@ type GraphNode = {
   kind: GraphNodeKind;
   x: number;
   y: number;
+  labelX: number;
+  labelY: number;
+  labelAnchor: "start" | "end";
+  labelWidth: number;
   isActive: boolean;
   isRouteNode: boolean;
+  hasLo: boolean;
 };
 
 type GraphEdge = {
@@ -25,6 +30,7 @@ type GraphEdge = {
   distanceKm: number | null;
   source: string | null;
   roadCategory: string | null;
+  isRouteEdge: boolean;
 };
 
 type OverlaySegment = {
@@ -73,6 +79,8 @@ const VIEW_WIDTH = 1600;
 const VIEW_HEIGHT = 980;
 const VIEW_PADDING = 120;
 const NODE_RADIUS = 18;
+const NODE_MIN_DISTANCE = 112;
+const LABEL_HEIGHT = 36;
 const EDGE_INSET = 20;
 const OVERLAY_EDGE_INSET = 34;
 const OVERLAY_OFFSET = 10;
@@ -98,6 +106,155 @@ function hasLayout(node: MasterNetworkNode) {
   return Number.isFinite(node.layout_x) && Number.isFinite(node.layout_y);
 }
 
+function hasGeoCoordinate(node: MasterNetworkNode) {
+  return Number.isFinite(node.lng) && Number.isFinite(node.lat) && (node.lng !== 0 || node.lat !== 0);
+}
+
+function fallbackRawCoordinate(node: MasterNetworkNode, index: number) {
+  if (hasLayout(node)) {
+    return {
+      rawX: Number(node.layout_x),
+      rawY: Number(node.layout_y),
+    };
+  }
+  return {
+    rawX: index + 1,
+    rawY: index + 1,
+  };
+}
+
+function estimateLabelWidth(node: Pick<GraphNode, "label" | "sublabel">) {
+  const longestLine = Math.max(node.label.length, node.sublabel.length);
+  return Math.min(240, Math.max(112, longestLine * 7.2 + 28));
+}
+
+// Keep lat/lng as the base projection, then nudge only the SVG marker positions when coordinates collide.
+function separateOverlappingNodes(nodes: GraphNode[]) {
+  const separated = nodes.map((node) => ({ ...node }));
+  const minDistance = NODE_MIN_DISTANCE;
+  const minX = VIEW_PADDING / 2;
+  const maxX = VIEW_WIDTH - VIEW_PADDING / 2;
+  const minY = VIEW_PADDING / 2;
+  const maxY = VIEW_HEIGHT - VIEW_PADDING / 2;
+
+  for (let iteration = 0; iteration < 90; iteration += 1) {
+    let moved = false;
+    for (let firstIndex = 0; firstIndex < separated.length; firstIndex += 1) {
+      for (let secondIndex = firstIndex + 1; secondIndex < separated.length; secondIndex += 1) {
+        const first = separated[firstIndex];
+        const second = separated[secondIndex];
+        const dx = second.x - first.x;
+        const dy = second.y - first.y;
+        const distance = Math.hypot(dx, dy);
+        if (distance >= minDistance) {
+          continue;
+        }
+
+        const stableAngle =
+          distance > 0
+            ? Math.atan2(dy, dx)
+            : ((first.id.charCodeAt(0) + second.id.charCodeAt(second.id.length - 1)) % 360) * (Math.PI / 180);
+        const push = (minDistance - distance) / 2 + 0.4;
+        const pushX = Math.cos(stableAngle) * push;
+        const pushY = Math.sin(stableAngle) * push;
+
+        first.x = Math.min(maxX, Math.max(minX, first.x - pushX));
+        first.y = Math.min(maxY, Math.max(minY, first.y - pushY));
+        second.x = Math.min(maxX, Math.max(minX, second.x + pushX));
+        second.y = Math.min(maxY, Math.max(minY, second.y + pushY));
+        moved = true;
+      }
+    }
+    if (!moved) {
+      break;
+    }
+  }
+
+  return separated;
+}
+
+function boxesOverlap(
+  first: { x: number; y: number; width: number; height: number },
+  second: { x: number; y: number; width: number; height: number },
+) {
+  const gap = 8;
+  return !(
+    first.x + first.width + gap < second.x ||
+    second.x + second.width + gap < first.x ||
+    first.y + first.height + gap < second.y ||
+    second.y + second.height + gap < first.y
+  );
+}
+
+function addReadableLabels(nodes: GraphNode[]) {
+  const placedBoxes: Array<{ x: number; y: number; width: number; height: number }> = [];
+  const minX = 24;
+  const maxX = VIEW_WIDTH - 24;
+  const minY = 24;
+  const maxY = VIEW_HEIGHT - 24;
+
+  return [...nodes]
+    .sort((first, second) => first.y - second.y || first.x - second.x)
+    .map((node, index) => {
+      const labelWidth = estimateLabelWidth(node);
+      const side = index % 2 === 0 ? 1 : -1;
+      const candidateOffsets = [
+        { dx: side * 58, dy: -42, anchor: side > 0 ? "start" : "end" },
+        { dx: side * 66, dy: 18, anchor: side > 0 ? "start" : "end" },
+        { dx: -side * 58, dy: -42, anchor: side > 0 ? "end" : "start" },
+        { dx: -side * 66, dy: 18, anchor: side > 0 ? "end" : "start" },
+        { dx: side * 92, dy: -84, anchor: side > 0 ? "start" : "end" },
+        { dx: -side * 92, dy: 62, anchor: side > 0 ? "end" : "start" },
+        { dx: side * 128, dy: -4, anchor: side > 0 ? "start" : "end" },
+        { dx: -side * 128, dy: -4, anchor: side > 0 ? "end" : "start" },
+      ] satisfies Array<{ dx: number; dy: number; anchor: "start" | "end" }>;
+
+      let selected = candidateOffsets[0];
+      let selectedBox: { x: number; y: number; width: number; height: number } | null = null;
+
+      for (const candidate of candidateOffsets) {
+        const labelX = Math.min(maxX, Math.max(minX, node.x + candidate.dx));
+        const labelY = Math.min(maxY, Math.max(minY, node.y + candidate.dy));
+        const boxX = candidate.anchor === "start" ? labelX - 12 : labelX - labelWidth + 12;
+        const box = {
+          x: Math.min(maxX - labelWidth, Math.max(minX, boxX)),
+          y: Math.min(maxY - LABEL_HEIGHT, Math.max(minY, labelY - 18)),
+          width: labelWidth,
+          height: LABEL_HEIGHT,
+        };
+        if (!placedBoxes.some((placed) => boxesOverlap(box, placed))) {
+          selected = candidate;
+          selectedBox = box;
+          break;
+        }
+      }
+
+      const fallbackLabelX = Math.min(maxX, Math.max(minX, node.x + selected.dx));
+      const fallbackLabelY = Math.min(maxY, Math.max(minY, node.y + selected.dy));
+      const box =
+        selectedBox ??
+        {
+          x:
+            selected.anchor === "start"
+              ? Math.min(maxX - labelWidth, Math.max(minX, fallbackLabelX - 12))
+              : Math.min(maxX - labelWidth, Math.max(minX, fallbackLabelX - labelWidth + 12)),
+          y: Math.min(maxY - LABEL_HEIGHT, Math.max(minY, fallbackLabelY - 18)),
+          width: labelWidth,
+          height: LABEL_HEIGHT,
+        };
+      placedBoxes.push(box);
+
+      return {
+        ...node,
+        labelX: selected.anchor === "start" ? box.x + 12 : box.x + box.width - 12,
+        labelY: box.y + 18,
+        labelAnchor: selected.anchor,
+        labelWidth,
+      };
+    })
+    .sort((first, second) => nodes.findIndex((node) => node.id === first.id) - nodes.findIndex((node) => node.id === second.id));
+}
+
 function nodeKind(node: MasterNetworkNode, depotId: string, orderNodeIds: Set<string>): GraphNodeKind {
   if (node.node_id === depotId || node.node_type === "DEPOT") {
     return "depot";
@@ -112,6 +269,16 @@ function nodeKind(node: MasterNetworkNode, depotId: string, orderNodeIds: Set<st
     return "missing";
   }
   return "poi";
+}
+
+function isNodeRelatedToDepot(node: MasterNetworkNode, depotId: string, orderNodeIds: Set<string>, routeNodeIds: Set<string>) {
+  if (node.node_id === depotId) {
+    return true;
+  }
+  if (orderNodeIds.has(node.node_id) || routeNodeIds.has(node.node_id)) {
+    return true;
+  }
+  return node.supply_depot_ids.includes(depotId);
 }
 
 function nodeFill(kind: GraphNodeKind) {
@@ -152,7 +319,7 @@ function buildGraphModel(args: {
 }): GraphModel {
   const { routes, nodes, edges, depotId, orderSpbuIds } = args;
   const orderNodeIds = new Set(orderSpbuIds);
-  const relevantNodeIds = new Set<string>([depotId, ...orderSpbuIds]);
+  const fallbackNodeIds = new Set<string>([depotId, ...orderSpbuIds]);
   const routeNodeIds = new Set<string>([depotId]);
   const pathEdgeKeys = new Set<string>();
   const truckLegend: TruckLegendItem[] = [];
@@ -170,7 +337,7 @@ function buildGraphModel(args: {
         return;
       }
       pathNodeIds.forEach((nodeId) => {
-        relevantNodeIds.add(nodeId);
+        fallbackNodeIds.add(nodeId);
         routeNodeIds.add(nodeId);
       });
       pathNodeIds.slice(0, -1).forEach((fromNodeId, index) => {
@@ -192,7 +359,7 @@ function buildGraphModel(args: {
     };
 
     route.stops.forEach((stop) => {
-      relevantNodeIds.add(stop.spbu_id);
+      fallbackNodeIds.add(stop.spbu_id);
       routeNodeIds.add(stop.spbu_id);
       addPath(
         parsePath(stop.travel_path),
@@ -205,41 +372,41 @@ function buildGraphModel(args: {
   });
 
   const nodeById = new Map(nodes.map((node) => [node.node_id, node]));
-  const relevantNodes = Array.from(relevantNodeIds).map((nodeId, index) => {
-    const existing = nodeById.get(nodeId);
-    if (existing) {
-      return existing;
-    }
-    return {
-      node_id: nodeId,
-      node_code: nodeId,
-      node_name: nodeId,
-      node_type: nodeId === depotId ? "DEPOT" : "POI",
-      lat: 0,
-      lng: 0,
-      layout_x: VIEW_PADDING + index * 44,
-      layout_y: VIEW_HEIGHT - VIEW_PADDING - 80,
-      truck_category: null,
-      is_active: false,
-      supply_depot_ids: [],
-    } satisfies MasterNetworkNode;
-  });
+  const depotRelatedNodes = nodes.filter((node) => isNodeRelatedToDepot(node, depotId, orderNodeIds, routeNodeIds));
+  const depotRelatedNodeIds = new Set(depotRelatedNodes.map((node) => node.node_id));
 
-  const useLayout = relevantNodes.filter(hasLayout).length >= 2;
+  const missingFallbackNodes = Array.from(fallbackNodeIds)
+    .filter((nodeId) => !depotRelatedNodeIds.has(nodeId))
+    .map((nodeId, index) => {
+      const existing = nodeById.get(nodeId);
+      if (existing) {
+        return existing;
+      }
+      return {
+        node_id: nodeId,
+        node_code: nodeId,
+        node_name: nodeId,
+        node_type: nodeId === depotId ? "DEPOT" : "POI",
+        lat: 0,
+        lng: 0,
+        layout_x: VIEW_PADDING + index * 44,
+        layout_y: VIEW_HEIGHT - VIEW_PADDING - 80,
+        truck_category: null,
+        is_active: false,
+        supply_depot_ids: [],
+      } satisfies MasterNetworkNode;
+    });
+
+  const relevantNodes = [...depotRelatedNodes, ...missingFallbackNodes];
+
   const rawPositions = relevantNodes.map((node, index) => ({
     nodeId: node.node_id,
-    rawX:
-      useLayout && Number.isFinite(node.layout_x)
-        ? Number(node.layout_x)
-        : node.lng !== 0
-          ? node.lng
-          : index + 1,
-    rawY:
-      useLayout && Number.isFinite(node.layout_y)
-        ? Number(node.layout_y)
-        : node.lat !== 0
-          ? -node.lat
-          : index + 1,
+    ...(hasGeoCoordinate(node)
+      ? {
+          rawX: node.lng,
+          rawY: -node.lat,
+        }
+      : fallbackRawCoordinate(node, index)),
   }));
 
   const minX = Math.min(...rawPositions.map((item) => item.rawX));
@@ -262,19 +429,22 @@ function buildGraphModel(args: {
       kind: nodeKind(node, depotId, orderNodeIds),
       x,
       y,
+      labelX: x,
+      labelY: y,
+      labelAnchor: "start",
+      labelWidth: 140,
       isActive: node.is_active,
       isRouteNode: routeNodeIds.has(node.node_id),
+      hasLo: orderNodeIds.has(node.node_id),
     } satisfies GraphNode;
   });
+  const separatedGraphNodes = addReadableLabels(separateOverlappingNodes(graphNodes));
 
-  const graphNodeById = new Map(graphNodes.map((node) => [node.id, node]));
+  const graphNodeById = new Map(separatedGraphNodes.map((node) => [node.id, node]));
   const graphEdges = new Map<string, GraphEdge>();
 
   edges.forEach((edge) => {
     const canonicalKey = canonicalEdgeKey(edge.from_node_id, edge.to_node_id);
-    if (!pathEdgeKeys.has(canonicalKey)) {
-      return;
-    }
     if (!graphNodeById.has(edge.from_node_id) || !graphNodeById.has(edge.to_node_id)) {
       return;
     }
@@ -287,6 +457,7 @@ function buildGraphModel(args: {
         distanceKm: edge.distance_km ?? null,
         source: edge.source ?? null,
         roadCategory: edge.road_category ?? null,
+        isRouteEdge: pathEdgeKeys.has(canonicalKey),
       });
     }
   });
@@ -307,6 +478,7 @@ function buildGraphModel(args: {
       distanceKm: null,
       source: "PATH",
       roadCategory: null,
+      isRouteEdge: true,
     });
   });
 
@@ -331,7 +503,7 @@ function buildGraphModel(args: {
   return {
     width: VIEW_WIDTH,
     height: VIEW_HEIGHT,
-    nodes: graphNodes,
+    nodes: separatedGraphNodes,
     edges: Array.from(graphEdges.values()),
     segments,
     truckLegend,
@@ -376,29 +548,14 @@ export function RouteMap({
   depotId: string;
   orderSpbuIds?: string[];
 }) {
-  const relevantNodeIds = useMemo(() => {
-    const ids = new Set<string>([depotId, ...orderSpbuIds]);
-    routes.forEach((route) => {
-      route.stops.forEach((stop) => {
-        ids.add(stop.spbu_id);
-        parsePath(stop.travel_path).forEach((nodeId) => ids.add(nodeId));
-      });
-      parsePath(route.return_path).forEach((nodeId) => ids.add(nodeId));
-    });
-    return Array.from(ids).sort();
-  }, [depotId, orderSpbuIds, routes]);
-
-  const nodeIdsKey = relevantNodeIds.join(",");
   const nodesQuery = useQuery({
-    queryKey: ["route-map-master-nodes", nodeIdsKey],
-    queryFn: () => listNetworkNodes(relevantNodeIds),
-    enabled: relevantNodeIds.length > 0,
+    queryKey: ["route-map-master-nodes", "depot-related-base-map"],
+    queryFn: () => listNetworkNodes(),
     staleTime: 60_000,
   });
   const edgesQuery = useQuery({
-    queryKey: ["route-map-master-edges", nodeIdsKey],
-    queryFn: () => listEffectiveEdges(relevantNodeIds),
-    enabled: relevantNodeIds.length > 0,
+    queryKey: ["route-map-master-edges", "depot-related-base-map"],
+    queryFn: () => listEffectiveEdges(),
     staleTime: 60_000,
   });
 
@@ -466,7 +623,7 @@ export function RouteMap({
   if (nodesQuery.isLoading || edgesQuery.isLoading) {
     return (
       <section className="rounded-[32px] border border-slate-200 bg-white p-6 text-sm text-slate-500">
-        Menyiapkan graph node dan edge dari masterdata SPBU...
+        Menyiapkan base map node dan edge dari masterdata SPBU...
       </section>
     );
   }
@@ -482,7 +639,7 @@ export function RouteMap({
   if (!graph.edges.length || !graph.nodes.length) {
     return (
       <section className="rounded-[32px] border border-amber-200 bg-amber-50 p-6 text-sm text-amber-700">
-        Graph masterdata berhasil dimuat, tetapi edge route yang cocok dengan path truck belum ditemukan.
+        Graph masterdata berhasil dimuat, tetapi node atau edge yang related dengan depot belum ditemukan.
       </section>
     );
   }
@@ -550,8 +707,8 @@ export function RouteMap({
         <div className="max-w-4xl">
           <h3 className="text-lg font-semibold text-ink">Route Map</h3>
           <p className="mt-1 text-sm text-slate-500">
-            Base edge diambil dari masterdata SPBU, lalu pergerakan setiap truck ditampilkan sebagai garis warna
-            ter-offset di samping edge yang sama.
+            Base map menampilkan node dan edge masterdata yang related dengan depot. SPBU yang punya LO pada hari
+            ini diberi halo kuning, lalu pergerakan truck ditampilkan sebagai garis warna ter-offset.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -584,7 +741,7 @@ export function RouteMap({
 
       <div className="mb-4 grid gap-3 md:grid-cols-4">
         <div className="rounded-[24px] border border-slate-200 bg-slate-50 px-4 py-3">
-          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Node Aktif</p>
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Node Base Map</p>
           <p className="mt-2 text-2xl font-semibold text-ink">{graph.nodes.length}</p>
         </div>
         <div className="rounded-[24px] border border-slate-200 bg-slate-50 px-4 py-3">
@@ -596,8 +753,8 @@ export function RouteMap({
           <p className="mt-2 text-2xl font-semibold text-ink">{graph.truckLegend.length}</p>
         </div>
         <div className="rounded-[24px] border border-slate-200 bg-slate-50 px-4 py-3">
-          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Order Node</p>
-          <p className="mt-2 text-2xl font-semibold text-ink">{orderSpbuIds.length}</p>
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">SPBU Dengan LO</p>
+          <p className="mt-2 text-2xl font-semibold text-ink">{new Set(orderSpbuIds).size}</p>
         </div>
       </div>
 
@@ -622,7 +779,7 @@ export function RouteMap({
           Base Edge Masterdata
         </button>
         <span className="rounded-full bg-slate-900 px-3 py-2 text-slate-100">Overlay Pergerakan Truck</span>
-        <span className="rounded-full bg-sky-50 px-3 py-2 text-sky-700">Order / SPBU Tujuan</span>
+        <span className="rounded-full bg-amber-50 px-3 py-2 text-amber-700">Halo Kuning = SPBU Dengan LO</span>
         <span className="rounded-full bg-lime-100 px-3 py-2 text-lime-700">Depot</span>
       </div>
 
@@ -687,9 +844,9 @@ export function RouteMap({
               }
 
               const base = edgePoints(from, to, 0);
-              const baseStroke = isBaseEdgeFocusActive ? "#475569" : "#aabcca";
-              const baseStrokeWidth = isBaseEdgeFocusActive ? 5.2 : 4;
-              const baseOpacity = isBaseEdgeFocusActive ? 0.98 : 0.86;
+              const baseStroke = isBaseEdgeFocusActive ? "#64748b" : "#94a3b8";
+              const baseStrokeWidth = isBaseEdgeFocusActive ? 4.8 : edge.isRouteEdge ? 4 : 2.8;
+              const baseOpacity = isBaseEdgeFocusActive ? 0.92 : edge.isRouteEdge ? 0.76 : 0.34;
               const label = [
                 edge.roadCategory,
                 edge.distanceKm !== null ? `${formatNumber(edge.distanceKm)} km` : null,
@@ -715,11 +872,11 @@ export function RouteMap({
                     x2={base.x2}
                     y2={base.y2}
                     stroke="#ffffff"
-                    strokeWidth={1.2}
-                    strokeOpacity={0.7}
+                    strokeWidth={edge.isRouteEdge ? 1.2 : 0.8}
+                    strokeOpacity={edge.isRouteEdge ? 0.7 : 0.36}
                     strokeLinecap="round"
                   />
-                  {label ? (
+                  {label && (edge.isRouteEdge || isBaseEdgeFocusActive) ? (
                     <g transform={`translate(${base.midX} ${base.midY - 10})`}>
                       <rect
                         x={-56}
@@ -774,20 +931,38 @@ export function RouteMap({
             })}
 
             {graph.nodes.map((node, index) => {
-              const dimmed = activeTruckNodeIds !== null && !activeTruckNodeIds.has(node.id);
-              const labelOffset = index % 2 === 0 ? -30 : 38;
+              const dimmed = !isBaseEdgeFocusActive && activeTruckNodeIds !== null && !activeTruckNodeIds.has(node.id);
+              const renderedFill = isBaseEdgeFocusActive ? "#f8fafc" : nodeFill(node.kind);
+              const renderedStroke = isBaseEdgeFocusActive ? "#94a3b8" : nodeStroke(node.kind);
+              const renderedStrokeWidth = isBaseEdgeFocusActive ? 2.2 : node.kind === "order" ? 3.5 : 2.4;
+              const labelBoxX = node.labelAnchor === "start" ? node.labelX - 12 : node.labelX - node.labelWidth + 12;
+              const labelBoxY = node.labelY - 18;
+              const connectorEndX = node.labelAnchor === "start" ? labelBoxX : labelBoxX + node.labelWidth;
               return (
                 <g key={node.id} opacity={dimmed ? 0.45 : 1}>
-                  {node.kind === "order" ? (
+                  {node.hasLo ? (
+                    <>
+                      <circle cx={node.x} cy={node.y} r={NODE_RADIUS + 11} fill="rgba(250,204,21,0.2)" />
+                      <circle
+                        cx={node.x}
+                        cy={node.y}
+                        r={NODE_RADIUS + 10}
+                        fill="none"
+                        stroke="#facc15"
+                        strokeWidth={5}
+                        strokeOpacity={0.9}
+                      />
+                    </>
+                  ) : node.kind === "order" ? (
                     <circle cx={node.x} cy={node.y} r={NODE_RADIUS + 7} fill="rgba(12,122,192,0.12)" />
                   ) : null}
                   <circle
                     cx={node.x}
                     cy={node.y}
                     r={NODE_RADIUS}
-                    fill={nodeFill(node.kind)}
-                    stroke={nodeStroke(node.kind)}
-                    strokeWidth={node.kind === "order" ? 3.5 : 2.4}
+                    fill={renderedFill}
+                    stroke={renderedStroke}
+                    strokeWidth={renderedStrokeWidth}
                   />
                   <text
                     x={node.x}
@@ -795,25 +970,44 @@ export function RouteMap({
                     fontSize="9"
                     fontWeight="800"
                     textAnchor="middle"
-                    fill={node.kind === "depot" ? "#294200" : "#173047"}
+                    fill={isBaseEdgeFocusActive ? "#475569" : node.kind === "depot" ? "#294200" : "#173047"}
                   >
                     {nodeTag(node.kind)}
                   </text>
+                  <line
+                    x1={node.x}
+                    y1={node.y}
+                    x2={connectorEndX}
+                    y2={node.labelY}
+                    stroke="rgba(100,116,139,0.42)"
+                    strokeWidth={1.2}
+                    strokeDasharray="4 4"
+                  />
+                  <rect
+                    x={labelBoxX}
+                    y={labelBoxY}
+                    width={node.labelWidth}
+                    height={LABEL_HEIGHT}
+                    rx={12}
+                    fill="rgba(255,255,255,0.88)"
+                    stroke={node.hasLo ? "rgba(250,204,21,0.7)" : "rgba(148,163,184,0.45)"}
+                    strokeWidth={node.hasLo ? 1.5 : 1}
+                  />
                   <text
-                    x={node.x}
-                    y={node.y + labelOffset}
-                    fontSize="12"
+                    x={node.labelX}
+                    y={node.labelY - 4}
+                    fontSize="11"
                     fontWeight="700"
-                    textAnchor="middle"
+                    textAnchor={node.labelAnchor}
                     fill="#173047"
                   >
                     {node.label}
                   </text>
                   <text
-                    x={node.x}
-                    y={node.y + labelOffset + 15}
-                    fontSize="10"
-                    textAnchor="middle"
+                    x={node.labelX}
+                    y={node.labelY + 11}
+                    fontSize="9.5"
+                    textAnchor={node.labelAnchor}
                     fill={node.isActive ? "#667a8d" : "#94a3b8"}
                   >
                     {node.sublabel}

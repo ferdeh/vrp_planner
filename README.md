@@ -174,16 +174,20 @@ Tab `Route Map` pada detail skenario sekarang memakai graph masterdata SPBU, buk
 
 Perilaku utamanya:
 
-- base edge diambil dari masterdata network melalui `nodes` dan `effective edges`
+- base map diambil dari masterdata network melalui `nodes` dan `effective edges`
+- node dan edge base map difilter ke graph yang related dengan depot skenario, termasuk depot, SPBU dengan `supply_depot_ids` yang memuat depot, dan node yang muncul di `travel_path`
+- SPBU dan depot diplot geo-first memakai koordinat `lat`/`lng`; `layout_x`/`layout_y` hanya dipakai sebagai fallback bila koordinat tidak valid
+- marker dan label node diberi de-overlap deterministik, sehingga SPBU/depot dengan koordinat sama atau sangat berdekatan tetap terbaca melalui callout label
 - overlay truck digambar sebagai garis warna yang ter-offset di samping base edge yang sama
 - legend nopol truck bisa diklik untuk fokus ke satu truck tertentu
-- legend `Base Edge Masterdata` bisa diklik untuk menyorot edge masterdata dan meredupkan overlay truck
+- legend `Base Edge Masterdata` bisa diklik untuk menampilkan seluruh node dan edge base map depot-related dalam warna abu-abu sekaligus meredupkan overlay truck
+- SPBU yang memiliki LO pada hari skenario diberi halo kuning di sekitar marker
 - zoom mendukung tombol UI maupun scroll/gesture trackpad di Mac
 - drag tetap dipakai untuk pan area graph
 
 Catatan:
 
-- route map hanya menampilkan node dan edge yang relevan dengan order, depot, dan `travel_path` hasil route
+- route map menampilkan node dan edge masterdata yang related dengan depot, bukan hanya node order atau edge yang dilewati truck
 - jika `travel_path` mengandung edge yang tidak ditemukan di `effective edges`, sistem tetap menggambar fallback edge agar jalur truck tetap terbaca
 
 ## 12. Mock mode
