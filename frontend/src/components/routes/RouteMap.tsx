@@ -701,6 +701,165 @@ export function RouteMap({
     setPan({ x: 0, y: 0 });
   };
 
+  const renderBaseEdge = (edge: GraphEdge, forceFocusLayer = false) => {
+    const from = graphNodeLookup.get(edge.fromNodeId);
+    const to = graphNodeLookup.get(edge.toNodeId);
+    if (!from || !to) {
+      return null;
+    }
+
+    const isFocusLayer = forceFocusLayer || isBaseEdgeFocusActive;
+    const base = edgePoints(from, to, 0);
+    const baseStroke = isFocusLayer ? "#020617" : "#94a3b8";
+    const baseStrokeWidth = isFocusLayer ? 5.4 : edge.isRouteEdge ? 4 : 2.8;
+    const baseOpacity = isFocusLayer ? 0.98 : edge.isRouteEdge ? 0.76 : 0.34;
+    const label = [
+      edge.roadCategory,
+      edge.distanceKm !== null ? `${formatNumber(edge.distanceKm)} km` : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+
+    return (
+      <g key={`${forceFocusLayer ? "focus-" : ""}${edge.id}`}>
+        <line
+          x1={base.x1}
+          y1={base.y1}
+          x2={base.x2}
+          y2={base.y2}
+          stroke={baseStroke}
+          strokeWidth={baseStrokeWidth}
+          strokeOpacity={baseOpacity}
+          strokeLinecap="round"
+        />
+        {!isFocusLayer ? (
+          <line
+            x1={base.x1}
+            y1={base.y1}
+            x2={base.x2}
+            y2={base.y2}
+            stroke="#ffffff"
+            strokeWidth={edge.isRouteEdge ? 1.2 : 0.8}
+            strokeOpacity={edge.isRouteEdge ? 0.7 : 0.36}
+            strokeLinecap="round"
+          />
+        ) : null}
+        {label && (edge.isRouteEdge || isFocusLayer) ? (
+          <g transform={`translate(${base.midX} ${base.midY - 10})`}>
+            <rect
+              x={-56}
+              y={-10}
+              width="112"
+              height="20"
+              rx="10"
+              fill="rgba(255,255,255,0.92)"
+              stroke={isFocusLayer ? "rgba(15,23,42,0.4)" : "rgba(170,188,202,0.55)"}
+            />
+            <text
+              x="0"
+              y="4"
+              fontSize="10"
+              fontWeight="700"
+              textAnchor="middle"
+              fill={isFocusLayer ? "#020617" : "#526173"}
+            >
+              {label}
+            </text>
+          </g>
+        ) : null}
+      </g>
+    );
+  };
+
+  const renderNode = (node: GraphNode) => {
+    const dimmed = !isBaseEdgeFocusActive && activeTruckNodeIds !== null && !activeTruckNodeIds.has(node.id);
+    const renderedFill = isBaseEdgeFocusActive && node.kind !== "depot" ? "#f8fafc" : nodeFill(node.kind);
+    const renderedStroke = isBaseEdgeFocusActive && node.kind !== "depot" ? "#94a3b8" : nodeStroke(node.kind);
+    const renderedStrokeWidth = isBaseEdgeFocusActive && node.kind !== "depot" ? 2.2 : node.kind === "order" ? 3.5 : 2.4;
+    const labelBoxX = node.labelAnchor === "start" ? node.labelX - 12 : node.labelX - node.labelWidth + 12;
+    const labelBoxY = node.labelY - 18;
+    const connectorEndX = node.labelAnchor === "start" ? labelBoxX : labelBoxX + node.labelWidth;
+
+    return (
+      <g key={node.id} opacity={dimmed ? 0.45 : 1}>
+        {node.hasLo ? (
+          <>
+            <circle cx={node.x} cy={node.y} r={NODE_RADIUS + 11} fill="rgba(250,204,21,0.2)" />
+            <circle
+              cx={node.x}
+              cy={node.y}
+              r={NODE_RADIUS + 10}
+              fill="none"
+              stroke="#facc15"
+              strokeWidth={5}
+              strokeOpacity={0.9}
+            />
+          </>
+        ) : node.kind === "order" ? (
+          <circle cx={node.x} cy={node.y} r={NODE_RADIUS + 7} fill="rgba(12,122,192,0.12)" />
+        ) : null}
+        <circle
+          cx={node.x}
+          cy={node.y}
+          r={NODE_RADIUS}
+          fill={renderedFill}
+          stroke={renderedStroke}
+          strokeWidth={renderedStrokeWidth}
+        />
+        {!node.hasLo ? (
+          <text
+            x={node.x}
+            y={node.y + 4}
+            fontSize="9"
+            fontWeight="800"
+            textAnchor="middle"
+            fill={isBaseEdgeFocusActive ? "#475569" : node.kind === "depot" ? "#294200" : "#173047"}
+          >
+            {nodeTag(node.kind)}
+          </text>
+        ) : null}
+        <line
+          x1={node.x}
+          y1={node.y}
+          x2={connectorEndX}
+          y2={node.labelY}
+          stroke="rgba(100,116,139,0.42)"
+          strokeWidth={1.2}
+          strokeDasharray="4 4"
+        />
+        <rect
+          x={labelBoxX}
+          y={labelBoxY}
+          width={node.labelWidth}
+          height={LABEL_HEIGHT}
+          rx={12}
+          fill="rgba(255,255,255,0.88)"
+          stroke={node.hasLo ? "rgba(250,204,21,0.7)" : "rgba(148,163,184,0.45)"}
+          strokeWidth={node.hasLo ? 1.5 : 1}
+        />
+        <text
+          x={node.labelX}
+          y={node.labelY - 4}
+          fontSize="11"
+          fontWeight="700"
+          textAnchor={node.labelAnchor}
+          fill="#173047"
+        >
+          {node.label}
+        </text>
+        <text
+          x={node.labelX}
+          y={node.labelY + 11}
+          fontSize="9.5"
+          textAnchor={node.labelAnchor}
+          fill={node.isActive ? "#667a8d" : "#94a3b8"}
+        >
+          {node.sublabel}
+        </text>
+      </g>
+    );
+  };
+
   return (
     <section className="rounded-[32px] border border-slate-200 bg-[linear-gradient(145deg,_rgba(255,255,255,0.98),_rgba(247,250,252,0.96))] p-5 shadow-sm">
       <div className="mb-4 flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
@@ -836,72 +995,7 @@ export function RouteMap({
           </defs>
 
           <g transform={`translate(${pan.x} ${pan.y}) scale(${zoom})`}>
-            {graph.edges.map((edge) => {
-              const from = graphNodeLookup.get(edge.fromNodeId);
-              const to = graphNodeLookup.get(edge.toNodeId);
-              if (!from || !to) {
-                return null;
-              }
-
-              const base = edgePoints(from, to, 0);
-              const baseStroke = isBaseEdgeFocusActive ? "#64748b" : "#94a3b8";
-              const baseStrokeWidth = isBaseEdgeFocusActive ? 4.8 : edge.isRouteEdge ? 4 : 2.8;
-              const baseOpacity = isBaseEdgeFocusActive ? 0.92 : edge.isRouteEdge ? 0.76 : 0.34;
-              const label = [
-                edge.roadCategory,
-                edge.distanceKm !== null ? `${formatNumber(edge.distanceKm)} km` : null,
-              ]
-                .filter(Boolean)
-                .join(" · ");
-
-              return (
-                <g key={edge.id}>
-                  <line
-                    x1={base.x1}
-                    y1={base.y1}
-                    x2={base.x2}
-                    y2={base.y2}
-                    stroke={baseStroke}
-                    strokeWidth={baseStrokeWidth}
-                    strokeOpacity={baseOpacity}
-                    strokeLinecap="round"
-                  />
-                  <line
-                    x1={base.x1}
-                    y1={base.y1}
-                    x2={base.x2}
-                    y2={base.y2}
-                    stroke="#ffffff"
-                    strokeWidth={edge.isRouteEdge ? 1.2 : 0.8}
-                    strokeOpacity={edge.isRouteEdge ? 0.7 : 0.36}
-                    strokeLinecap="round"
-                  />
-                  {label && (edge.isRouteEdge || isBaseEdgeFocusActive) ? (
-                    <g transform={`translate(${base.midX} ${base.midY - 10})`}>
-                      <rect
-                        x={-56}
-                        y={-10}
-                        width="112"
-                        height="20"
-                        rx="10"
-                        fill="rgba(255,255,255,0.92)"
-                        stroke="rgba(170,188,202,0.55)"
-                      />
-                      <text
-                        x="0"
-                        y="4"
-                        fontSize="10"
-                        fontWeight="700"
-                        textAnchor="middle"
-                        fill={isBaseEdgeFocusActive ? "#334155" : "#526173"}
-                      >
-                        {label}
-                      </text>
-                    </g>
-                  ) : null}
-                </g>
-              );
-            })}
+            {!isBaseEdgeFocusActive ? graph.edges.map((edge) => renderBaseEdge(edge)) : null}
 
             {graph.segments.map((segment) => {
               const from = graphNodeLookup.get(segment.fromNodeId);
@@ -930,91 +1024,10 @@ export function RouteMap({
               );
             })}
 
-            {graph.nodes.map((node, index) => {
-              const dimmed = !isBaseEdgeFocusActive && activeTruckNodeIds !== null && !activeTruckNodeIds.has(node.id);
-              const renderedFill = isBaseEdgeFocusActive ? "#f8fafc" : nodeFill(node.kind);
-              const renderedStroke = isBaseEdgeFocusActive ? "#94a3b8" : nodeStroke(node.kind);
-              const renderedStrokeWidth = isBaseEdgeFocusActive ? 2.2 : node.kind === "order" ? 3.5 : 2.4;
-              const labelBoxX = node.labelAnchor === "start" ? node.labelX - 12 : node.labelX - node.labelWidth + 12;
-              const labelBoxY = node.labelY - 18;
-              const connectorEndX = node.labelAnchor === "start" ? labelBoxX : labelBoxX + node.labelWidth;
-              return (
-                <g key={node.id} opacity={dimmed ? 0.45 : 1}>
-                  {node.hasLo ? (
-                    <>
-                      <circle cx={node.x} cy={node.y} r={NODE_RADIUS + 11} fill="rgba(250,204,21,0.2)" />
-                      <circle
-                        cx={node.x}
-                        cy={node.y}
-                        r={NODE_RADIUS + 10}
-                        fill="none"
-                        stroke="#facc15"
-                        strokeWidth={5}
-                        strokeOpacity={0.9}
-                      />
-                    </>
-                  ) : node.kind === "order" ? (
-                    <circle cx={node.x} cy={node.y} r={NODE_RADIUS + 7} fill="rgba(12,122,192,0.12)" />
-                  ) : null}
-                  <circle
-                    cx={node.x}
-                    cy={node.y}
-                    r={NODE_RADIUS}
-                    fill={renderedFill}
-                    stroke={renderedStroke}
-                    strokeWidth={renderedStrokeWidth}
-                  />
-                  <text
-                    x={node.x}
-                    y={node.y + 4}
-                    fontSize="9"
-                    fontWeight="800"
-                    textAnchor="middle"
-                    fill={isBaseEdgeFocusActive ? "#475569" : node.kind === "depot" ? "#294200" : "#173047"}
-                  >
-                    {nodeTag(node.kind)}
-                  </text>
-                  <line
-                    x1={node.x}
-                    y1={node.y}
-                    x2={connectorEndX}
-                    y2={node.labelY}
-                    stroke="rgba(100,116,139,0.42)"
-                    strokeWidth={1.2}
-                    strokeDasharray="4 4"
-                  />
-                  <rect
-                    x={labelBoxX}
-                    y={labelBoxY}
-                    width={node.labelWidth}
-                    height={LABEL_HEIGHT}
-                    rx={12}
-                    fill="rgba(255,255,255,0.88)"
-                    stroke={node.hasLo ? "rgba(250,204,21,0.7)" : "rgba(148,163,184,0.45)"}
-                    strokeWidth={node.hasLo ? 1.5 : 1}
-                  />
-                  <text
-                    x={node.labelX}
-                    y={node.labelY - 4}
-                    fontSize="11"
-                    fontWeight="700"
-                    textAnchor={node.labelAnchor}
-                    fill="#173047"
-                  >
-                    {node.label}
-                  </text>
-                  <text
-                    x={node.labelX}
-                    y={node.labelY + 11}
-                    fontSize="9.5"
-                    textAnchor={node.labelAnchor}
-                    fill={node.isActive ? "#667a8d" : "#94a3b8"}
-                  >
-                    {node.sublabel}
-                  </text>
-                </g>
-              );
-            })}
+            {isBaseEdgeFocusActive ? graph.edges.map((edge) => renderBaseEdge(edge, true)) : null}
+
+            {graph.nodes.filter((node) => node.kind !== "depot").map((node) => renderNode(node))}
+            {graph.nodes.filter((node) => node.kind === "depot").map((node) => renderNode(node))}
           </g>
         </svg>
       </div>
