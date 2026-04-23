@@ -182,13 +182,18 @@ Perilaku utamanya:
 - legend nopol truck bisa diklik untuk fokus ke satu truck tertentu
 - legend `Base Edge Masterdata` bisa diklik untuk menampilkan seluruh node dan edge base map depot-related dalam warna abu-abu sekaligus meredupkan overlay truck
 - SPBU yang memiliki LO pada hari skenario diberi halo kuning di sekitar marker
-- zoom mendukung tombol UI maupun scroll/gesture trackpad di Mac
-- drag tetap dipakai untuk pan area graph
+- zoom mendukung tombol UI `+` dan `-`, scroll mouse, serta gesture trackpad di Mac
+- tombol `Hand` mengaktifkan drag-pan manual tanpa mematikan zoom via trackpad
+- tombol `Select Zoom` memungkinkan user membuat selection box untuk zoom ke area tertentu
+- tombol `Re-layout by Hierarchical` menyusun graph dari depot sebagai root ke node turunan berdasarkan keterhubungan
+- tombol `Re-layout by Coordinate` mengembalikan susunan graph berdasarkan koordinat node masterdata
+- tombol `Print PDF` mengekspor seluruh canvas ke PDF dengan logo Petrofin dan skala mengikuti zoom aktif
 
 Catatan:
 
 - route map menampilkan node dan edge masterdata yang related dengan depot, bukan hanya node order atau edge yang dilewati truck
 - jika `travel_path` mengandung edge yang tidak ditemukan di `effective edges`, sistem tetap menggambar fallback edge agar jalur truck tetap terbaca
+- garis overlay `solid` menunjukkan leg perjalanan utama truck, sedangkan garis `putus-putus` menunjukkan `return_path` atau perjalanan kembali
 
 ## 12. Mock mode
 
