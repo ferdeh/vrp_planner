@@ -34,6 +34,11 @@ type GraphEdge = {
   isRouteEdge: boolean;
 };
 
+type HierarchicalLayoutResult = {
+  positions: Map<string, { x: number; y: number }>;
+  treeEdgeKeys: Set<string>;
+};
+
 type OverlaySegment = {
   id: string;
   fromNodeId: string;
@@ -61,6 +66,7 @@ type GraphModel = {
   edges: GraphEdge[];
   segments: OverlaySegment[];
   truckLegend: TruckLegendItem[];
+  treeEdgeKeys: Set<string>;
 };
 
 type GraphLayoutMode = "coordinates" | "hierarchical";
@@ -356,10 +362,13 @@ function buildHierarchicalPositions(args: {
   nodes: MasterNetworkNode[];
   depotId: string;
   links: Array<{ fromNodeId: string; toNodeId: string }>;
-}) {
+}): HierarchicalLayoutResult {
   const { nodes, depotId, links } = args;
   if (!nodes.length) {
-    return new Map<string, { x: number; y: number }>();
+    return {
+      positions: new Map<string, { x: number; y: number }>(),
+      treeEdgeKeys: new Set<string>(),
+    };
   }
 
   const nodeById = new Map(nodes.map((node) => [node.node_id, node]));
@@ -408,7 +417,10 @@ function buildHierarchicalPositions(args: {
     nodes.find((node) => node.node_type === "DEPOT")?.node_id ||
     nodes[0]?.node_id;
   if (!rootId) {
-    return buildCoordinatePositions(nodes);
+    return {
+      positions: buildCoordinatePositions(nodes),
+      treeEdgeKeys: new Set<string>(),
+    };
   }
 
   const levelById = new Map<string, number>([[rootId, 0]]);
@@ -431,11 +443,13 @@ function buildHierarchicalPositions(args: {
   }
 
   const childrenById = new Map<string, string[]>();
+  const treeEdgeKeys = new Set<string>();
   parentById.forEach((parentId, childId) => {
     const children = childrenById.get(parentId) ?? [];
     children.push(childId);
     children.sort(compareNodeIds);
     childrenById.set(parentId, children);
+    treeEdgeKeys.add(canonicalEdgeKey(parentId, childId));
   });
 
   const unitWidth = 190;
@@ -512,7 +526,10 @@ function buildHierarchicalPositions(args: {
     });
   }
 
-  return mapRawPositionsToView(rawPositions);
+  return {
+    positions: mapRawPositionsToView(rawPositions),
+    treeEdgeKeys,
+  };
 }
 
 function buildGraphModel(args: {
@@ -635,10 +652,12 @@ function buildGraphModel(args: {
           depotId,
           links: Array.from(layoutLinks.values()),
         })
-      : buildCoordinatePositions(relevantNodes);
+      : null;
+  const projectedNodePositions = projectedPositions?.positions ?? buildCoordinatePositions(relevantNodes);
+  const treeEdgeKeys = projectedPositions?.treeEdgeKeys ?? new Set<string>();
 
   const graphNodes = relevantNodes.map((node) => {
-    const projected = projectedPositions.get(node.node_id);
+    const projected = projectedNodePositions.get(node.node_id);
     const x = projected?.x ?? VIEW_WIDTH / 2;
     const y = projected?.y ?? VIEW_HEIGHT / 2;
     return {
@@ -657,7 +676,8 @@ function buildGraphModel(args: {
       hasLo: orderNodeIds.has(node.node_id),
     } satisfies GraphNode;
   });
-  const separatedGraphNodes = addReadableLabels(separateOverlappingNodes(graphNodes));
+  const positionedGraphNodes = layoutMode === "hierarchical" ? graphNodes : separateOverlappingNodes(graphNodes);
+  const separatedGraphNodes = addReadableLabels(positionedGraphNodes);
 
   const graphNodeById = new Map(separatedGraphNodes.map((node) => [node.id, node]));
   const graphEdges = new Map<string, GraphEdge>();
@@ -726,6 +746,7 @@ function buildGraphModel(args: {
     edges: Array.from(graphEdges.values()),
     segments,
     truckLegend,
+    treeEdgeKeys,
   };
 }
 
@@ -748,6 +769,25 @@ function edgePoints(from: GraphNode, to: GraphNode, offset: number, inset = EDGE
     y2: to.y - unitY * inset + normalY * offset,
     midX: (from.x + to.x) / 2 + normalX * offset,
     midY: (from.y + to.y) / 2 + normalY * offset,
+  };
+}
+
+function orthogonalEdgePath(from: GraphNode, to: GraphNode, offset: number, inset = EDGE_INSET) {
+  if (Math.abs(to.y - from.y) < 52) {
+    return null;
+  }
+
+  const direction = to.y >= from.y ? 1 : -1;
+  const startX = from.x + offset;
+  const startY = from.y + direction * inset;
+  const endX = to.x + offset;
+  const endY = to.y - direction * inset;
+  const bendY = startY + (endY - startY) / 2;
+
+  return {
+    path: `M ${startX} ${startY} L ${startX} ${bendY} L ${endX} ${bendY} L ${endX} ${endY}`,
+    midX: (startX + endX) / 2,
+    midY: bendY,
   };
 }
 
@@ -1263,32 +1303,7 @@ export function RouteMap({
           </defs>
           <g transform={`translate(${exportPanX} ${exportPanY}) scale(${zoom})`}>
             {!isBaseEdgeFocusActive ? graph.edges.map((edge) => renderBaseEdge(edge)) : null}
-            {graph.segments.map((segment) => {
-              const from = graphNodeLookup.get(segment.fromNodeId);
-              const to = graphNodeLookup.get(segment.toNodeId);
-              if (!from || !to) {
-                return null;
-              }
-              const dimmed = isBaseEdgeFocusActive || (activeTruckId !== null && activeTruckId !== segment.truckId);
-              const overlay = edgePoints(from, to, laneOffset(segment), OVERLAY_EDGE_INSET);
-              const overlayStroke = isBaseEdgeFocusActive ? "#cbd5e1" : segment.color;
-              return (
-                <g key={`print-${segment.id}`} opacity={isBaseEdgeFocusActive ? 0.32 : dimmed ? 0.12 : 1}>
-                  <line
-                    x1={overlay.x1}
-                    y1={overlay.y1}
-                    x2={overlay.x2}
-                    y2={overlay.y2}
-                    stroke={overlayStroke}
-                    strokeWidth={segment.isReturn ? 3.6 : 4.6}
-                    strokeLinecap="round"
-                    strokeDasharray={segment.isReturn ? "10 8" : undefined}
-                    markerEnd={`url(#print-arrow-${segment.truckId})`}
-                    vectorEffect="non-scaling-stroke"
-                  />
-                </g>
-              );
-            })}
+            {graph.segments.map((segment) => renderOverlaySegment(segment, { keyPrefix: "print-", markerPrefix: "print-" }))}
             {isBaseEdgeFocusActive ? graph.edges.map((edge) => renderBaseEdge(edge, true)) : null}
             {graph.nodes.filter((node) => node.kind !== "depot").map((node) => renderNode(node))}
             {graph.nodes.filter((node) => node.kind === "depot").map((node) => renderNode(node))}
@@ -1349,45 +1364,80 @@ export function RouteMap({
     }
 
     const isFocusLayer = forceFocusLayer || isBaseEdgeFocusActive;
+    const isHierarchical = layoutMode === "hierarchical";
+    const isTreeEdge = graph.treeEdgeKeys.has(edge.canonicalKey);
     const base = edgePoints(from, to, 0);
-    const baseStroke = isFocusLayer ? "#020617" : "#94a3b8";
-    const baseStrokeWidth = isFocusLayer ? 5.4 : edge.isRouteEdge ? 4 : 2.8;
-    const baseOpacity = isFocusLayer ? 0.98 : edge.isRouteEdge ? 0.76 : 0.34;
+    const orthogonal = isHierarchical ? orthogonalEdgePath(from, to, 0) : null;
+    const baseStroke = isFocusLayer ? "#020617" : isHierarchical ? (isTreeEdge ? "#0f172a" : "#cbd5e1") : "#94a3b8";
+    const baseStrokeWidth = isFocusLayer ? 5.4 : isHierarchical ? (isTreeEdge ? (edge.isRouteEdge ? 4.8 : 3.8) : edge.isRouteEdge ? 2.6 : 1.6) : edge.isRouteEdge ? 4 : 2.8;
+    const baseOpacity = isFocusLayer ? 0.98 : isHierarchical ? (isTreeEdge ? (edge.isRouteEdge ? 0.96 : 0.68) : edge.isRouteEdge ? 0.18 : 0.1) : edge.isRouteEdge ? 0.76 : 0.34;
+    const baseDasharray = !isFocusLayer && isHierarchical && !isTreeEdge ? "7 7" : undefined;
     const label = [
       edge.roadCategory,
       edge.distanceKm !== null ? `${formatNumber(edge.distanceKm)} km` : null,
     ]
       .filter(Boolean)
       .join(" · ");
+    const labelX = orthogonal?.midX ?? base.midX;
+    const labelY = orthogonal?.midY ?? base.midY;
+    const showLabel = Boolean(label) && (isHierarchical ? isFocusLayer || isTreeEdge : edge.isRouteEdge || isFocusLayer);
 
     return (
       <g key={`${forceFocusLayer ? "focus-" : ""}${edge.id}`}>
-        <line
-          x1={base.x1}
-          y1={base.y1}
-          x2={base.x2}
-          y2={base.y2}
-          stroke={baseStroke}
-          strokeWidth={baseStrokeWidth}
-          strokeOpacity={baseOpacity}
-          strokeLinecap="round"
-          vectorEffect="non-scaling-stroke"
-        />
-        {!isFocusLayer ? (
+        {orthogonal ? (
+          <path
+            d={orthogonal.path}
+            fill="none"
+            stroke={baseStroke}
+            strokeWidth={baseStrokeWidth}
+            strokeOpacity={baseOpacity}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeDasharray={baseDasharray}
+            vectorEffect="non-scaling-stroke"
+          />
+        ) : (
           <line
             x1={base.x1}
             y1={base.y1}
             x2={base.x2}
             y2={base.y2}
-            stroke="#ffffff"
-            strokeWidth={edge.isRouteEdge ? 1.2 : 0.8}
-            strokeOpacity={edge.isRouteEdge ? 0.7 : 0.36}
+            stroke={baseStroke}
+            strokeWidth={baseStrokeWidth}
+            strokeOpacity={baseOpacity}
             strokeLinecap="round"
+            strokeDasharray={baseDasharray}
             vectorEffect="non-scaling-stroke"
           />
+        )}
+        {!isFocusLayer && (isTreeEdge || !isHierarchical) ? (
+          orthogonal ? (
+            <path
+              d={orthogonal.path}
+              fill="none"
+              stroke="#ffffff"
+              strokeWidth={edge.isRouteEdge ? 1.2 : 0.8}
+              strokeOpacity={edge.isRouteEdge ? 0.7 : 0.36}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              vectorEffect="non-scaling-stroke"
+            />
+          ) : (
+            <line
+              x1={base.x1}
+              y1={base.y1}
+              x2={base.x2}
+              y2={base.y2}
+              stroke="#ffffff"
+              strokeWidth={edge.isRouteEdge ? 1.2 : 0.8}
+              strokeOpacity={edge.isRouteEdge ? 0.7 : 0.36}
+              strokeLinecap="round"
+              vectorEffect="non-scaling-stroke"
+            />
+          )
         ) : null}
-        {label && (edge.isRouteEdge || isFocusLayer) ? (
-          <g transform={`translate(${base.midX} ${base.midY - 10}) scale(${inverseZoom})`}>
+        {showLabel ? (
+          <g transform={`translate(${labelX} ${labelY - 10}) scale(${inverseZoom})`}>
             <rect
               x={-56}
               y={-10}
@@ -1409,6 +1459,69 @@ export function RouteMap({
             </text>
           </g>
         ) : null}
+      </g>
+    );
+  };
+
+  const renderOverlaySegment = (
+    segment: OverlaySegment,
+    options?: {
+      keyPrefix?: string;
+      markerPrefix?: string;
+    },
+  ) => {
+    const from = graphNodeLookup.get(segment.fromNodeId);
+    const to = graphNodeLookup.get(segment.toNodeId);
+    if (!from || !to) {
+      return null;
+    }
+
+    const keyPrefix = options?.keyPrefix ?? "";
+    const markerPrefix = options?.markerPrefix ?? "";
+    const dimmed = isBaseEdgeFocusActive || (activeTruckId !== null && activeTruckId !== segment.truckId);
+    const isTreeSegment = graph.treeEdgeKeys.has(segment.canonicalKey);
+    const overlay = edgePoints(from, to, laneOffset(segment), OVERLAY_EDGE_INSET);
+    const orthogonal = layoutMode === "hierarchical" ? orthogonalEdgePath(from, to, laneOffset(segment), OVERLAY_EDGE_INSET) : null;
+    const overlayStroke = isBaseEdgeFocusActive ? "#cbd5e1" : segment.color;
+    const overlayOpacity = isBaseEdgeFocusActive ? 0.32 : dimmed ? 0.12 : layoutMode === "hierarchical" && !isTreeSegment ? 0.22 : 1;
+    const overlayWidth =
+      layoutMode === "hierarchical" && !isTreeSegment
+        ? segment.isReturn
+          ? 2.8
+          : 3.3
+        : segment.isReturn
+          ? 3.6
+          : 4.6;
+    const overlayDasharray = segment.isReturn ? "10 8" : layoutMode === "hierarchical" && !isTreeSegment ? "6 6" : undefined;
+
+    return (
+      <g key={`${keyPrefix}${segment.id}`} opacity={overlayOpacity}>
+        {orthogonal ? (
+          <path
+            d={orthogonal.path}
+            fill="none"
+            stroke={overlayStroke}
+            strokeWidth={overlayWidth}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeDasharray={overlayDasharray}
+            markerEnd={`url(#${markerPrefix}arrow-${segment.truckId})`}
+            vectorEffect="non-scaling-stroke"
+          />
+        ) : (
+          <line
+            x1={overlay.x1}
+            y1={overlay.y1}
+            x2={overlay.x2}
+            y2={overlay.y2}
+            stroke={overlayStroke}
+            strokeWidth={overlayWidth}
+            strokeLinecap="round"
+            strokeDasharray={overlayDasharray}
+            markerEnd={`url(#${markerPrefix}arrow-${segment.truckId})`}
+            vectorEffect="non-scaling-stroke"
+          />
+        )}
       </g>
     );
   };
@@ -1751,34 +1864,7 @@ export function RouteMap({
 
           <g transform={`translate(${pan.x} ${pan.y}) scale(${zoom})`}>
             {!isBaseEdgeFocusActive ? graph.edges.map((edge) => renderBaseEdge(edge)) : null}
-
-            {graph.segments.map((segment) => {
-              const from = graphNodeLookup.get(segment.fromNodeId);
-              const to = graphNodeLookup.get(segment.toNodeId);
-              if (!from || !to) {
-                return null;
-              }
-              const dimmed =
-                isBaseEdgeFocusActive || (activeTruckId !== null && activeTruckId !== segment.truckId);
-              const overlay = edgePoints(from, to, laneOffset(segment), OVERLAY_EDGE_INSET);
-              const overlayStroke = isBaseEdgeFocusActive ? "#cbd5e1" : segment.color;
-              return (
-                <g key={segment.id} opacity={isBaseEdgeFocusActive ? 0.32 : dimmed ? 0.12 : 1}>
-                  <line
-                    x1={overlay.x1}
-                    y1={overlay.y1}
-                    x2={overlay.x2}
-                    y2={overlay.y2}
-                    stroke={overlayStroke}
-                    strokeWidth={segment.isReturn ? 3.6 : 4.6}
-                    strokeLinecap="round"
-                    strokeDasharray={segment.isReturn ? "10 8" : undefined}
-                    markerEnd={`url(#arrow-${segment.truckId})`}
-                    vectorEffect="non-scaling-stroke"
-                  />
-                </g>
-              );
-            })}
+            {graph.segments.map((segment) => renderOverlaySegment(segment))}
 
             {isBaseEdgeFocusActive ? graph.edges.map((edge) => renderBaseEdge(edge, true)) : null}
 
