@@ -192,15 +192,44 @@ const penalties = [
     name: "Depot operation window penalty per minute",
     description: "Penalty per menit untuk soft Depot operation window.",
   },
+  {
+    name: "Active truck idle penalty per minute",
+    description: "Penalty per menit jika truck aktif selesai terlalu cepat dibanding threshold utilisasi minimum pada objective truck count atau depot operation.",
+  },
+  {
+    name: "Unused opportunity capacity penalty per KL",
+    description: "Penalty per KL untuk kapasitas trip atau reload yang terlanjur dijalankan tetapi tidak termanfaatkan. Aktif pada objective minimize depot operation time.",
+  },
+  {
+    name: "Soft cross-cluster penalty",
+    description: "Penalty perpindahan shipment ke shipment antar cluster RouteFinder saat cluster mode soft aktif.",
+  },
+  {
+    name: "Hard cross-cluster penalty",
+    description: "Penalty perpindahan shipment ke shipment antar cluster RouteFinder saat cluster mode hard aktif. Nilai ini tetap berupa objective penalty besar, bukan hard constraint absolut.",
+  },
+  {
+    name: "Idle threshold truck count dan depot operation",
+    description: "Threshold utilisasi minimum truck aktif untuk objective utama minimize truck count dan minimize depot operation time. Default masing-masing 50% dan 75%.",
+  },
 ];
 
 const outputs = [
-  "Summary scenario menunjukkan truck aktif, distance, time, cost, penalty, dan depot operation.",
+  "Scenario Summary menunjukkan truck aktif, demand delivered, cost, penalty, depot operation, dan runtime.",
+  "Cluster Metrics sekarang tampil di dalam tab Scenario Summary, tepat di bawah card grafik armada.",
+  "Order Detail menampilkan List Order lengkap beserta status served atau unserved, ETA SPBU, dan nopol truck yang melayani.",
   "Route Grafik memperlihatkan urutan pergerakan truck termasuk Depot Service dan Depot Reload.",
   "Route Map memperlihatkan base edge masterdata dan overlay pergerakan truck per warna di atas graph node SPBU/depot.",
   "Route per MT menampilkan stop detail, ETA, ETD, volume kirim, dan trip per truck.",
-  "Unserved order menampilkan order yang tidak terlayani beserta alasannya.",
   "Compare scenario memudahkan membandingkan hasil beberapa skenario pada hari yang sama.",
+];
+
+const routeFinderSettings = [
+  "Semua pengaturan RouteFinder sekarang berada di halaman Settings dan Constraints, di bagian paling bawah setelah kelompok Default Cost dan Penalty.",
+  "Field yang tersedia adalah Use RouteFinder Clustering, Cluster Mode, Max Cluster Size, Soft cross-cluster penalty, dan Hard cross-cluster penalty.",
+  "Tombol Simpan Settings akan menyimpan settings global sekaligus solver settings RouteFinder.",
+  "Tombol Reset cross-cluster penalty ke default mengembalikan nilai ke soft 50000 dan hard 5000000.",
+  "RouteFinder hanya membentuk cluster SPBU. OR-Tools tetap menjadi solver final untuk assignment vehicle, multi-trip, dan route akhir.",
 ];
 
 const routeMapNotes = [
@@ -429,6 +458,20 @@ export function UserGuidePage() {
               <p className="mt-2 text-sm leading-6 text-slate-600">{item.description}</p>
             </article>
           ))}
+        </div>
+      </GuideSection>
+
+      <GuideSection
+        eyebrow="Settings"
+        title="RouteFinder Settings"
+        description="Pengaturan hybrid RouteFinder sekarang tidak lagi berada di tab terpisah. Semua field solver settings dipusatkan ke halaman Settings global."
+      >
+        <div className="rounded-[24px] border border-slate-200 bg-white p-6 shadow-sm">
+          <ul className="list-disc space-y-3 pl-5 text-sm leading-6 text-slate-600">
+            {routeFinderSettings.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
         </div>
       </GuideSection>
 

@@ -9,6 +9,7 @@ export type SolutionStatus =
 export type AnalysisLevel = "level_1" | "level_2";
 export type AnalysisStatus = "processing" | "completed" | "error";
 export type PrimaryObjective = "minimize_depot_operation" | "minimize_truck_count";
+export type ClusterMode = "soft" | "hard";
 
 export interface OrderInput {
   order_id: string;
@@ -144,6 +145,12 @@ export interface OptimizationConfig {
     priority_eta_penalty_per_minute: number;
     overtime_penalty_per_minute: number;
     depot_operation_window_penalty_per_minute: number;
+    soft_cluster_penalty: number;
+    hard_cluster_penalty: number;
+    active_truck_idle_penalty_per_minute: number;
+    unused_opportunity_capacity_penalty_per_kl: number;
+    active_truck_idle_threshold_percent_truck_count: number;
+    active_truck_idle_threshold_percent_depot_operation: number;
     capacity_violation_penalty: number;
     activation_cost_vehicle: number;
     distance_weight: number;
@@ -168,6 +175,7 @@ export interface OptimizationRequest {
   orders: OrderInput[];
   available_trucks: TruckInput[];
   optimization_config: OptimizationConfig;
+  solver_settings?: SolverSettings | null;
 }
 
 export interface SystemSettingsResponse {
@@ -181,6 +189,28 @@ export interface SystemSettingsResponse {
 export interface SystemSettingsPayload {
   default_optimization_config: OptimizationConfig;
   ui_preferences: Record<string, unknown>;
+}
+
+export interface SolverSettings {
+  use_routefinder: boolean;
+  cluster_mode: ClusterMode;
+  max_cluster_size: number;
+}
+
+export interface SolverSettingsResponse extends SolverSettings {
+  id: string;
+  tenant_id?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SolverJobResponse {
+  scenario_id: string;
+  status: SolutionStatus;
+  message: string;
+  created_at: string;
+  solver_mode: string;
+  solver_settings: SolverSettings;
 }
 
 export interface RepositoryVersionItem {
@@ -214,6 +244,8 @@ export interface CostBreakdown {
   distance_cost_total: number;
   time_cost_total: number;
   depot_operation_cost_total: number;
+  active_truck_idle_penalty_total: number;
+  unused_opportunity_capacity_penalty_total: number;
   late_arrival_penalty_total: number;
   priority_eta_penalty_total: number;
   overtime_penalty_total: number;
@@ -318,6 +350,7 @@ export interface ScenarioListItem {
   dispatch_date: string;
   depot_id: string;
   status: SolutionStatus;
+  status_message?: string | null;
   total_demand: number;
   total_delivered_demand: number;
   active_truck_count: number;
@@ -343,6 +376,76 @@ export interface ScenarioDetailResponse extends OptimizationResultResponse {
   input_orders: OrderInput[];
   input_trucks: TruckInput[];
   created_at: string;
+}
+
+export interface ClusterMetricsSummary {
+  total_distance: number;
+  total_trips: number;
+  cluster_adherence?: number | null;
+  cross_cluster_moves: number;
+  shortage_kl: number;
+  truck_utilization?: number | null;
+  total_clusters: number;
+  total_spbu: number;
+}
+
+export interface ClusterMetricsCluster {
+  cluster_id: string;
+  spbu_ids: string[];
+  spbu_count: number;
+  total_demand_kl: number;
+  avg_distance: number;
+  cluster_leakage: number;
+  inbound_transitions: number;
+  outbound_transitions: number;
+  internal_transitions: number;
+}
+
+export interface ClusterMetricsEdge {
+  truck_id: string;
+  no_polisi?: string | null;
+  from_spbu_id: string;
+  to_spbu_id: string;
+  from_cluster?: string | null;
+  to_cluster?: string | null;
+  distance_km: number;
+  trip_sequence: number;
+  is_cross_cluster: boolean;
+}
+
+export interface ClusterTruckMetric {
+  truck_id: string;
+  no_polisi?: string | null;
+  dominant_cluster?: string | null;
+  purity_ratio: number;
+  cluster_count: number;
+  total_nodes: number;
+  dominant_cluster_nodes: number;
+  utilization_percent: number;
+  total_distance: number;
+  trip_count: number;
+}
+
+export interface ClusterMetricsHistoryItem {
+  scenario_id: string;
+  run_id?: string | null;
+  created_at: string;
+  solver_mode: string;
+  total_distance: number;
+  total_demand: number;
+  total_trips: number;
+  cluster_adherence?: number | null;
+  cross_cluster_moves: number;
+}
+
+export interface ClusterMetricsResponse {
+  scenario_id: string;
+  has_cluster_data: boolean;
+  summary: ClusterMetricsSummary;
+  clusters: ClusterMetricsCluster[];
+  edges: ClusterMetricsEdge[];
+  truck_metrics: ClusterTruckMetric[];
+  history: ClusterMetricsHistoryItem[];
 }
 
 export interface ScenarioAnalysisExperimentResult {

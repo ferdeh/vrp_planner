@@ -11,6 +11,11 @@ from app.models import schemas
 from app.services.master_data_client import MasterDataClient
 from app.services.network_client import NetworkClient
 from app.services.preprocessing_service import PreprocessedProblem
+from app.solver.objective import (
+    active_truck_idle_penalty_enabled,
+    active_truck_idle_target_minutes,
+    unused_opportunity_capacity_penalty_enabled,
+)
 from app.solver.ortools_solver import SolverOutput
 from app.utils.time_utils import elapsed_minutes, hhmm_to_minutes, minutes_to_hhmm
 
@@ -113,29 +118,19 @@ class ResultService:
         total_depot_operation_time_minutes: int,
         depot_operation_window_start: str | None = None,
         depot_operation_window_end: str | None = None,
+        vehicle_min_cycle_minutes_by_truck_id: dict[str, int] | None = None,
     ) -> schemas.CostBreakdown:
         order_by_id = {item.order_id: item for item in input_orders}
         truck_by_id = {item.truck_id: item for item in input_trucks}
         active_routes = [route for route in routes if self._route_has_delivery(route)]
-        activation_cost_total = (
-            len(active_routes) * config.penalties.activation_cost_vehicle
-            if config.minimize_truck_count
-            else 0.0
-        )
-        distance_cost_total = (
-            sum(route.route_distance for route in active_routes) * config.penalties.distance_weight
-            if config.minimize_distance
-            else 0.0
-        )
-        time_cost_total = (
-            sum(route.route_time for route in active_routes) * config.penalties.time_weight
-            if config.minimize_time
-            else 0.0
-        )
+        # Keep the realized operational cost components stable across
+        # scenarios, then layer mode-specific utilization penalties on top so
+        # the reported breakdown stays aligned with the solver policy.
+        activation_cost_total = len(active_routes) * config.penalties.activation_cost_vehicle
+        distance_cost_total = sum(route.route_distance for route in active_routes) * config.penalties.distance_weight
+        time_cost_total = sum(route.route_time for route in active_routes) * config.penalties.time_weight
         depot_operation_cost_total = (
             total_depot_operation_time_minutes * config.penalties.depot_operation_time_weight
-            if config.minimize_depot_operation_time
-            else 0.0
         )
 
         unserved_penalty_total = 0.0
@@ -144,6 +139,8 @@ class ResultService:
         overtime_penalty_total = 0.0
         max_total_distance_penalty_total = 0.0
         depot_operation_window_penalty_total = 0.0
+        active_truck_idle_penalty_total = 0.0
+        unused_opportunity_capacity_penalty_total = 0.0
 
         if config.soft_constraints.allow_unserved_orders:
             unserved_penalty_total += len(unserved_orders) * config.penalties.unserved_order_penalty
@@ -226,6 +223,34 @@ class ResultService:
                     penalty_per_minute=config.penalties.depot_operation_window_penalty_per_minute,
                 )
 
+        if active_truck_idle_penalty_enabled(config):
+            for route in active_routes:
+                truck = truck_by_id.get(route.truck_id)
+                if truck is None:
+                    continue
+                idle_target_minutes = active_truck_idle_target_minutes(
+                    truck,
+                    config,
+                    min_cycle_minutes=(
+                        (vehicle_min_cycle_minutes_by_truck_id or {}).get(route.truck_id)
+                        or self._estimate_route_min_cycle_minutes(route, order_by_id)
+                    ),
+                )
+                if idle_target_minutes <= 0:
+                    continue
+                active_truck_idle_penalty_total += (
+                    max(0, idle_target_minutes - route.route_time)
+                    * config.penalties.active_truck_idle_penalty_per_minute
+                )
+
+        if unused_opportunity_capacity_penalty_enabled(config):
+            for route in active_routes:
+                executed_trip_capacity = route.capacity_kl * max(1, route.trip_count)
+                unused_opportunity_capacity_penalty_total += (
+                    max(0.0, executed_trip_capacity - route.total_load)
+                    * config.penalties.unused_opportunity_capacity_penalty_per_kl
+                )
+
         total_penalty = (
             unserved_penalty_total
             + late_arrival_penalty_total
@@ -233,6 +258,8 @@ class ResultService:
             + overtime_penalty_total
             + max_total_distance_penalty_total
             + depot_operation_window_penalty_total
+            + active_truck_idle_penalty_total
+            + unused_opportunity_capacity_penalty_total
         )
         total_cost = (
             activation_cost_total
@@ -247,6 +274,8 @@ class ResultService:
             distance_cost_total=round(distance_cost_total, 2),
             time_cost_total=round(time_cost_total, 2),
             depot_operation_cost_total=round(depot_operation_cost_total, 2),
+            active_truck_idle_penalty_total=round(active_truck_idle_penalty_total, 2),
+            unused_opportunity_capacity_penalty_total=round(unused_opportunity_capacity_penalty_total, 2),
             late_arrival_penalty_total=round(late_arrival_penalty_total, 2),
             priority_eta_penalty_total=round(priority_eta_penalty_total, 2),
             overtime_penalty_total=round(overtime_penalty_total, 2),
@@ -256,6 +285,27 @@ class ResultService:
             total_penalty_cost=round(total_penalty, 2),
             total_cost=round(total_cost, 2),
         )
+
+    def _estimate_route_min_cycle_minutes(
+        self,
+        route: schemas.RouteDetailResponse,
+        order_by_id: dict[str, schemas.OrderInput],
+    ) -> int:
+        delivery_stops = [stop for stop in route.stops if stop.stop_kind == "delivery"]
+        if not delivery_stops:
+            return 0
+        first_stop = delivery_stops[0]
+        if first_stop.travel_time_minutes is None or route.return_travel_time_minutes is None:
+            return 0
+        order = order_by_id.get(first_stop.parent_order_id) or order_by_id.get(first_stop.order_id)
+        order_service_minutes = order.service_time_minutes if order is not None else 0
+        cycle_minutes = (
+            int(route.depot_service_time_minutes)
+            + int(round(first_stop.travel_time_minutes or 0))
+            + int(order_service_minutes)
+            + int(round(route.return_travel_time_minutes or 0))
+        )
+        return max(0, cycle_minutes)
 
     def _derive_origin_service_start(
         self,
@@ -786,6 +836,14 @@ class ResultService:
             total_depot_operation_time_minutes=total_depot_operation_time_minutes,
             depot_operation_window_start=minutes_to_hhmm(problem.depot_operation_window_start),
             depot_operation_window_end=minutes_to_hhmm(problem.depot_operation_window_end),
+            vehicle_min_cycle_minutes_by_truck_id={
+                truck.truck_id: (
+                    problem.vehicle_min_cycle_minutes[index]
+                    if index < len(problem.vehicle_min_cycle_minutes)
+                    else 0
+                )
+                for index, truck in enumerate(problem.trucks)
+            },
         )
         if assignment is None:
             if solver_output.search_status == routing_enums_pb2.RoutingSearchStatus.ROUTING_FAIL_TIMEOUT:

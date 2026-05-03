@@ -7,9 +7,11 @@ from types import SimpleNamespace
 from ortools.constraint_solver import routing_enums_pb2
 
 from app.models import schemas
+from app.schemas.routefinder_cluster_schema import Cluster
 from app.services import master_data_client as master_data_module
 from app.services.preprocessing_service import PreprocessedProblem, PreprocessingService, RouteNode
 from app.services.result_service import ResultService
+from app.solver.model_builder import cluster_penalty
 from app.solver.objective import effective_unserved_penalty, objective_priority_scale, transit_cost
 from app.solver import ortools_solver as ortools_solver_module
 from app.solver.ortools_solver import OrToolsSolver
@@ -111,6 +113,8 @@ def _build_mode_comparison_payload(primary_objective: str) -> schemas.Optimizati
                     "priority_eta_penalty_per_minute": 200,
                     "overtime_penalty_per_minute": 50,
                     "depot_operation_window_penalty_per_minute": 50,
+                    "soft_cluster_penalty": 50000,
+                    "hard_cluster_penalty": 5000000,
                     "capacity_violation_penalty": 0,
                     "activation_cost_vehicle": 10000,
                     "distance_weight": 1,
@@ -129,6 +133,92 @@ def _build_mode_comparison_payload(primary_objective: str) -> schemas.Optimizati
             },
         }
     )
+
+
+def test_cluster_penalty_uses_configured_cross_cluster_values(sample_payload):
+    payload = schemas.OptimizationRequest.model_validate(sample_payload)
+    payload.optimization_config.penalties.soft_cluster_penalty = 1234
+    payload.optimization_config.penalties.hard_cluster_penalty = 5678
+
+    shipment_a = RouteNode(
+        node_index=1,
+        node_kind="shipment",
+        order_id="ORD001",
+        parent_order_id="ORD001",
+        spbu_id="SPBU001",
+        product_type="PERTALITE",
+        demand_kl=8,
+        service_time_minutes=30,
+        time_window_start=0,
+        time_window_end=1439,
+        allowed_vehicle_indices=[0],
+        matrix_node_name="SPBU001",
+        cluster_id="CL-001",
+    )
+    shipment_b = RouteNode(
+        node_index=2,
+        node_kind="shipment",
+        order_id="ORD002",
+        parent_order_id="ORD002",
+        spbu_id="SPBU002",
+        product_type="PERTALITE",
+        demand_kl=8,
+        service_time_minutes=30,
+        time_window_start=0,
+        time_window_end=1439,
+        allowed_vehicle_indices=[0],
+        matrix_node_name="SPBU002",
+        cluster_id="CL-002",
+    )
+
+    soft_problem = PreprocessedProblem(
+        depot_id="DPT001",
+        depot_name="Depot",
+        depot_gate_limit=1,
+        depot_operation_window_start=0,
+        depot_operation_window_end=1439,
+        dispatch_date="2026-05-04",
+        depot_service_time_minutes=30,
+        config=payload.optimization_config,
+        notes=[],
+        route_nodes=[shipment_a, shipment_b],
+        preassigned_unserved=[],
+        orders=payload.orders,
+        trucks=[payload.available_trucks[0]],
+        spbu_map={},
+        time_matrix=[[0]],
+        distance_matrix=[[0]],
+        matrix_positions={"DEPOT": 0},
+        clusters=[Cluster(cluster_id="CL-001", spbu_ids=["SPBU001"], total_demand_kl=8)],
+        cluster_mode="soft",
+        use_routefinder=True,
+    )
+
+    hard_problem = PreprocessedProblem(
+        depot_id=soft_problem.depot_id,
+        depot_name=soft_problem.depot_name,
+        depot_gate_limit=soft_problem.depot_gate_limit,
+        depot_operation_window_start=soft_problem.depot_operation_window_start,
+        depot_operation_window_end=soft_problem.depot_operation_window_end,
+        dispatch_date=soft_problem.dispatch_date,
+        depot_service_time_minutes=soft_problem.depot_service_time_minutes,
+        config=payload.optimization_config,
+        notes=[],
+        route_nodes=[shipment_a, shipment_b],
+        preassigned_unserved=[],
+        orders=payload.orders,
+        trucks=[payload.available_trucks[0]],
+        spbu_map={},
+        time_matrix=[[0]],
+        distance_matrix=[[0]],
+        matrix_positions={"DEPOT": 0},
+        clusters=[Cluster(cluster_id="CL-001", spbu_ids=["SPBU001"], total_demand_kl=8)],
+        cluster_mode="hard",
+        use_routefinder=True,
+    )
+
+    assert cluster_penalty(soft_problem, shipment_a, shipment_b) == 1234
+    assert cluster_penalty(hard_problem, shipment_a, shipment_b) == 5678
 
 
 def test_solver_returns_feasible_basic_case(configured_modules, sample_payload):
@@ -2350,6 +2440,147 @@ def test_result_service_collapses_initial_depot_reload_block_into_wait():
     assert trip_count == 1
 
 
+def test_result_service_applies_mode_specific_utilization_penalties(sample_payload):
+    payload = schemas.OptimizationRequest.model_validate(sample_payload)
+    service = ResultService()
+    routes = [
+        schemas.RouteDetailResponse(
+            truck_id="TRK002",
+            truck_type="MEDIUM",
+            capacity_kl=16,
+            total_load=8,
+            utilization_percent=50,
+            route_distance=100,
+            route_time=200,
+            stop_count=1,
+            trip_count=1,
+            depot_service_time_minutes=30,
+            return_eta="10:00",
+            return_travel_time_minutes=30,
+            stops=[
+                schemas.RouteStopResponse(
+                    sequence=1,
+                    order_id="ORD001",
+                    parent_order_id="ORD001",
+                    spbu_id="SPBU001",
+                    stop_kind="delivery",
+                    spbu_name="SPBU A",
+                    travel_time_minutes=30,
+                    eta="08:00",
+                    etd="08:30",
+                    delivered_volume=8,
+                    arrival_status="on_time",
+                ),
+            ],
+        )
+    ]
+
+    truck_count_config = payload.optimization_config.model_copy(
+        update={
+            "primary_objective": schemas.PrimaryObjective.MINIMIZE_TRUCK_COUNT,
+            "minimize_truck_count": True,
+            "minimize_depot_operation_time": False,
+            "penalties": payload.optimization_config.penalties.model_copy(
+                update={
+                    "active_truck_idle_penalty_per_minute": 10,
+                    "unused_opportunity_capacity_penalty_per_kl": 100,
+                    "active_truck_idle_threshold_percent_truck_count": 50,
+                    "active_truck_idle_threshold_percent_depot_operation": 75,
+                }
+            ),
+        }
+    )
+    depot_config = payload.optimization_config.model_copy(
+        update={
+            "primary_objective": schemas.PrimaryObjective.MINIMIZE_DEPOT_OPERATION,
+            "minimize_truck_count": False,
+            "minimize_depot_operation_time": True,
+            "penalties": payload.optimization_config.penalties.model_copy(
+                update={
+                    "active_truck_idle_penalty_per_minute": 10,
+                    "unused_opportunity_capacity_penalty_per_kl": 100,
+                    "active_truck_idle_threshold_percent_truck_count": 50,
+                    "active_truck_idle_threshold_percent_depot_operation": 75,
+                }
+            ),
+        }
+    )
+
+    truck_count_cost = service._calculate_cost_breakdown(
+        truck_count_config,
+        routes,
+        [],
+        payload.orders,
+        payload.available_trucks,
+        total_depot_operation_time_minutes=30,
+    )
+    depot_cost = service._calculate_cost_breakdown(
+        depot_config,
+        routes,
+        [],
+        payload.orders,
+        payload.available_trucks,
+        total_depot_operation_time_minutes=30,
+    )
+
+    assert truck_count_cost.activation_cost_total == 10000
+    assert depot_cost.activation_cost_total == 10000
+    assert truck_count_cost.depot_operation_cost_total == 30
+    assert depot_cost.depot_operation_cost_total == 30
+    assert truck_count_cost.active_truck_idle_penalty_total == 1600
+    assert truck_count_cost.unused_opportunity_capacity_penalty_total == 0
+    assert depot_cost.active_truck_idle_penalty_total == 3400
+    assert depot_cost.unused_opportunity_capacity_penalty_total == 800
+    assert truck_count_cost.total_cost == 11930
+    assert depot_cost.total_cost == 14530
+
+
+def test_partial_service_config_prioritizes_served_demand_before_soft_penalties():
+    base = schemas.OptimizationConfig.model_validate(
+        {
+            "primary_objective": "minimize_depot_operation",
+            "allow_unserved_fallback": True,
+            "minimize_truck_count": False,
+            "minimize_distance": True,
+            "minimize_time": True,
+            "minimize_depot_operation_time": True,
+            "soft_constraints": {
+                "allow_unserved_orders": True,
+                "allow_overtime": True,
+                "time_window": True,
+                "max_vehicle_working_time": True,
+            },
+            "penalties": {
+                "unserved_order_penalty": 1000000000,
+                "late_arrival_penalty_per_minute": 100,
+                "priority_eta_penalty_per_minute": 200,
+                "overtime_penalty_per_minute": 50,
+                "depot_operation_window_penalty_per_minute": 50,
+                "active_truck_idle_penalty_per_minute": 4000,
+                "unused_opportunity_capacity_penalty_per_kl": 60000,
+                "distance_weight": 1,
+                "time_weight": 1,
+                "depot_operation_time_weight": 1,
+            },
+        }
+    )
+    problem = SimpleNamespace(config=base)
+
+    partial = OrToolsSolver._partial_service_config(problem)
+
+    assert partial.soft_constraints.allow_unserved_orders is True
+    assert partial.penalties.unserved_order_penalty == 1000000000
+    assert partial.penalties.late_arrival_penalty_per_minute == 0
+    assert partial.penalties.priority_eta_penalty_per_minute == 0
+    assert partial.penalties.overtime_penalty_per_minute == 0
+    assert partial.penalties.depot_operation_window_penalty_per_minute == 0
+    assert partial.penalties.active_truck_idle_penalty_per_minute == 0
+    assert partial.penalties.unused_opportunity_capacity_penalty_per_kl == 0
+    assert partial.penalties.distance_weight == 0
+    assert partial.penalties.time_weight == 0
+    assert partial.penalties.depot_operation_time_weight == 0
+
+
 def test_result_service_preserves_reload_before_wait_when_delivery_follows():
     service = ResultService()
     raw_stops = [
@@ -2592,6 +2823,248 @@ def test_solver_depot_mode_uses_all_trucks_and_finishes_earlier(configured_modul
     assert len(result.route_details) == 4
     assert all(route.trip_count == 2 for route in result.route_details)
     assert max(hhmm_to_minutes(route.return_eta) for route in result.route_details if route.return_eta) == 480
+
+
+def test_solver_depot_mode_keeps_strict_search_neutral_before_refinement(configured_modules, monkeypatch):
+    monkeypatch.setattr(
+        master_data_module,
+        "MOCK_SPBU",
+        [
+            {
+                "spbu_id": f"SPBU{index:03d}",
+                "name": f"SPBU {index}",
+                "lat": -6.11,
+                "lng": 106.71,
+                "time_window_start": "06:00",
+                "time_window_end": "10:00",
+                "truck_category": 4,
+                "allowed_truck_types": ["SMALL"],
+            }
+            for index in range(1, 9)
+        ],
+    )
+    monkeypatch.setitem(master_data_module.MOCK_DEPOTS[0], "gate_limit", 10)
+    monkeypatch.setitem(master_data_module.MOCK_DEPOTS[0], "time_window_start", "06:00")
+    monkeypatch.setitem(master_data_module.MOCK_DEPOTS[0], "time_window_end", "10:00")
+
+    payload = _build_mode_comparison_payload("minimize_depot_operation")
+    problem = PreprocessingService(network_client=_ConstantMatrixNetworkClient()).preprocess(
+        payload,
+        payload.optimization_config,
+    )
+
+    solver = OrToolsSolver()
+    sentinel_policy = ortools_solver_module.VehicleActivationPolicy(force_active_vehicle_indices=(0, 1))
+    strict_model = SimpleNamespace(name="strict")
+    optimize_model = SimpleNamespace(name="optimize")
+    strict_assignment = object()
+    optimize_assignment = object()
+    policy_calls: list[tuple[str, object | None]] = []
+
+    monkeypatch.setattr(
+        OrToolsSolver,
+        "_mode_activation_policy",
+        staticmethod(lambda _problem: sentinel_policy),
+    )
+
+    def fake_solve_stage(
+        self,
+        stage_problem,
+        *,
+        time_limit_seconds,
+        include_soft_priority_eta_objective,
+        local_search_metaheuristic=None,
+        activation_policy=None,
+    ):
+        policy_calls.append(("strict", activation_policy))
+        return ortools_solver_module.StageSolveResult(
+            built_model=strict_model,
+            assignment=strict_assignment,
+            search_status=routing_enums_pb2.RoutingSearchStatus.ROUTING_SUCCESS,
+        )
+
+    def fake_refine_stage(
+        self,
+        stage_problem,
+        *,
+        seed_model,
+        seed_assignment,
+        time_limit_seconds,
+        include_soft_priority_eta_objective,
+        local_search_metaheuristic=None,
+        activation_policy=None,
+    ):
+        assert seed_model is strict_model
+        assert seed_assignment is strict_assignment
+        policy_calls.append(("refine", activation_policy))
+        return ortools_solver_module.StageSolveResult(
+            built_model=optimize_model,
+            assignment=optimize_assignment,
+            search_status=routing_enums_pb2.RoutingSearchStatus.ROUTING_SUCCESS,
+        )
+
+    monkeypatch.setattr(OrToolsSolver, "_solve_stage", fake_solve_stage)
+    monkeypatch.setattr(OrToolsSolver, "_refine_stage", fake_refine_stage)
+
+    result = solver._run_full_service_depot_pipeline(problem, started=0.0, total_seconds=10)
+
+    assert policy_calls == [("strict", None), ("refine", sentinel_policy)]
+    assert result.assignment is optimize_assignment
+    assert result.built_model is optimize_model
+    assert result.search_status == routing_enums_pb2.RoutingSearchStatus.ROUTING_SUCCESS
+
+
+def test_solver_depot_mode_keeps_best_effort_feasibility_search_neutral(configured_modules, monkeypatch):
+    monkeypatch.setattr(
+        master_data_module,
+        "MOCK_SPBU",
+        [
+            {
+                "spbu_id": f"SPBU{index:03d}",
+                "name": f"SPBU {index}",
+                "lat": -6.11,
+                "lng": 106.71,
+                "time_window_start": "06:00",
+                "time_window_end": "10:00",
+                "truck_category": 4,
+                "allowed_truck_types": ["SMALL"],
+            }
+            for index in range(1, 9)
+        ],
+    )
+    monkeypatch.setitem(master_data_module.MOCK_DEPOTS[0], "gate_limit", 10)
+    monkeypatch.setitem(master_data_module.MOCK_DEPOTS[0], "time_window_start", "06:00")
+    monkeypatch.setitem(master_data_module.MOCK_DEPOTS[0], "time_window_end", "10:00")
+
+    payload = _build_mode_comparison_payload("minimize_depot_operation")
+    problem = PreprocessingService(network_client=_ConstantMatrixNetworkClient()).preprocess(
+        payload,
+        payload.optimization_config,
+    )
+
+    solver = OrToolsSolver()
+    sentinel_policy = ortools_solver_module.VehicleActivationPolicy(force_active_vehicle_indices=(0, 1))
+    base_model = SimpleNamespace(name="base")
+    repair_model = SimpleNamespace(name="repair")
+    cleanup_model = SimpleNamespace(name="cleanup")
+    quality_model = SimpleNamespace(name="quality")
+    cost_model = SimpleNamespace(name="cost")
+    base_assignment = object()
+    repair_assignment = object()
+    cleanup_assignment = object()
+    quality_assignment = object()
+    cost_assignment = object()
+    policy_calls: list[tuple[str, object | None]] = []
+
+    monkeypatch.setattr(OrToolsSolver, "_allocate_best_effort_budgets", staticmethod(lambda _seconds: (10, 5, 6, 4, 3)))
+    monkeypatch.setattr(
+        OrToolsSolver,
+        "_mode_activation_policy",
+        staticmethod(lambda _problem: sentinel_policy),
+    )
+
+    def fake_solve_stage(
+        self,
+        stage_problem,
+        *,
+        time_limit_seconds,
+        include_soft_priority_eta_objective,
+        local_search_metaheuristic=None,
+        activation_policy=None,
+    ):
+        policy_calls.append(("service", activation_policy))
+        return ortools_solver_module.StageSolveResult(
+            built_model=base_model,
+            assignment=base_assignment,
+            search_status=routing_enums_pb2.RoutingSearchStatus.ROUTING_SUCCESS,
+        )
+
+    def fake_refine_stage(
+        self,
+        stage_problem,
+        *,
+        seed_model,
+        seed_assignment,
+        time_limit_seconds,
+        include_soft_priority_eta_objective,
+        local_search_metaheuristic=None,
+        activation_policy=None,
+    ):
+        if local_search_metaheuristic is not None:
+            policy_calls.append(("repair", activation_policy))
+            return ortools_solver_module.StageSolveResult(
+                built_model=repair_model,
+                assignment=repair_assignment,
+                search_status=routing_enums_pb2.RoutingSearchStatus.ROUTING_SUCCESS,
+            )
+        if stage_problem is problem:
+            policy_calls.append(("cost", activation_policy))
+            return ortools_solver_module.StageSolveResult(
+                built_model=cost_model,
+                assignment=cost_assignment,
+                search_status=routing_enums_pb2.RoutingSearchStatus.ROUTING_SUCCESS,
+            )
+        policy_calls.append(("quality", activation_policy))
+        return ortools_solver_module.StageSolveResult(
+            built_model=quality_model,
+            assignment=quality_assignment,
+            search_status=routing_enums_pb2.RoutingSearchStatus.ROUTING_SUCCESS,
+        )
+
+    monkeypatch.setattr(OrToolsSolver, "_solve_stage", fake_solve_stage)
+    monkeypatch.setattr(OrToolsSolver, "_refine_stage", fake_refine_stage)
+    monkeypatch.setattr(
+        OrToolsSolver,
+        "_count_unserved_shipments",
+        staticmethod(lambda _problem, _model, _assignment: 1),
+    )
+
+    def fake_targeted_cleanup(
+        self,
+        cleanup_problem,
+        *,
+        seed_model,
+        seed_assignment,
+        current_unserved,
+        time_limit_seconds,
+        activation_policy=None,
+    ):
+        policy_calls.append(("targeted_cleanup", activation_policy))
+        return cleanup_model, cleanup_assignment, 1
+
+    def fake_forced_cleanup(
+        self,
+        cleanup_problem,
+        *,
+        seed_model,
+        seed_assignment,
+        current_unserved,
+        time_limit_seconds,
+        activation_policy=None,
+    ):
+        policy_calls.append(("forced_cleanup", activation_policy))
+        return None
+
+    monkeypatch.setattr(OrToolsSolver, "_run_targeted_cleanup_repair", fake_targeted_cleanup)
+    monkeypatch.setattr(OrToolsSolver, "_run_forced_residual_insertion", fake_forced_cleanup)
+
+    result = solver._run_best_effort_pipeline(
+        problem,
+        started=0.0,
+        total_seconds=28,
+    )
+
+    assert policy_calls == [
+        ("service", None),
+        ("repair", None),
+        ("targeted_cleanup", None),
+        ("forced_cleanup", None),
+        ("quality", sentinel_policy),
+        ("cost", sentinel_policy),
+    ]
+    assert result.assignment is cost_assignment
+    assert result.built_model is cost_model
+    assert "targeted cleanup" in result.message
 
 
 def test_solver_truck_count_mode_reduces_active_trucks_with_deeper_multi_trip(configured_modules, monkeypatch):

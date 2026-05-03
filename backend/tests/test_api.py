@@ -6,8 +6,11 @@ from copy import deepcopy
 from datetime import datetime, timezone
 
 from app.api.routes import version as version_route
+from app.models import db_models
 from app.models import schemas
+from app.schemas.routefinder_cluster_schema import Cluster, ClusterResult
 from app.services.scenario_analysis_service import _ExperimentRun, ScenarioAnalysisService
+from app.services import routefinder_client as routefinder_client_module
 
 
 def test_settings_update_roundtrip(client):
@@ -25,6 +28,56 @@ def test_settings_update_roundtrip(client):
     )
     assert update_response.status_code == 200
     assert update_response.json()["default_optimization_config"]["solver_options"]["max_solver_seconds"] == 42
+
+
+def test_settings_get_normalizes_legacy_utilization_defaults(client, configured_modules):
+    _, database_module, _ = configured_modules
+    legacy_config = schemas.OptimizationConfig().model_dump()
+    legacy_config["penalties"]["active_truck_idle_penalty_per_minute"] = 50
+    legacy_config["penalties"]["unused_opportunity_capacity_penalty_per_kl"] = 500
+    legacy_config["penalties"].pop("active_truck_idle_threshold_percent_truck_count", None)
+    legacy_config["penalties"].pop("active_truck_idle_threshold_percent_depot_operation", None)
+
+    with database_module.SessionLocal() as session:
+        session.add(
+            db_models.SystemSettings(
+                default_optimization_config=legacy_config,
+                ui_preferences={},
+                is_active=True,
+            )
+        )
+        session.commit()
+
+    response = client.get("/api/v1/settings")
+
+    assert response.status_code == 200
+    penalties = response.json()["default_optimization_config"]["penalties"]
+    assert penalties["unserved_order_penalty"] == 1000000000
+    assert penalties["active_truck_idle_penalty_per_minute"] == 4000
+    assert penalties["unused_opportunity_capacity_penalty_per_kl"] == 60000
+    assert penalties["soft_cluster_penalty"] == 50000
+    assert penalties["hard_cluster_penalty"] == 5000000
+    assert penalties["active_truck_idle_threshold_percent_truck_count"] == 50
+    assert penalties["active_truck_idle_threshold_percent_depot_operation"] == 75
+
+
+def test_solver_settings_default_off_and_update_roundtrip(client):
+    response = client.get("/api/vrp/solver-settings")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["use_routefinder"] is False
+
+    update_response = client.put(
+        "/api/vrp/solver-settings",
+        json={
+            "use_routefinder": True,
+            "cluster_mode": "hard",
+            "max_cluster_size": 6,
+        },
+    )
+    assert update_response.status_code == 200
+    assert update_response.json()["use_routefinder"] is True
+    assert update_response.json()["cluster_mode"] == "hard"
 
 
 def test_version_endpoint_returns_repository_metadata(client, monkeypatch):
@@ -91,6 +144,113 @@ def test_optimize_endpoint_and_scenario_detail(client, sample_payload):
     assert "total_depot_operation_time_minutes" in detail
     assert detail["input_trucks"][0]["compartments"]
     assert detail["input_trucks"][0]["truck_category"] == sample_payload["available_trucks"][0]["truck_category"]
+
+
+def test_vrp_solve_endpoint_without_routefinder(client, sample_payload):
+    payload = deepcopy(sample_payload)
+    payload["solver_settings"] = {
+        "use_routefinder": False,
+        "cluster_mode": "soft",
+        "max_cluster_size": 5,
+    }
+
+    solve_response = client.post("/api/vrp/solve", json=payload)
+    assert solve_response.status_code == 202
+    body = solve_response.json()
+    assert body["solver_mode"] == "OR-Tools Only"
+
+    detail_response = client.get(f"/api/v1/scenarios/{body['scenario_id']}")
+    assert detail_response.status_code == 200
+    assert detail_response.json()["status"] in {"feasible", "partial"}
+
+
+def test_vrp_solve_endpoint_with_routefinder_success(client, sample_payload, monkeypatch):
+    payload = deepcopy(sample_payload)
+    payload["solver_settings"] = {
+        "use_routefinder": True,
+        "cluster_mode": "soft",
+        "max_cluster_size": 5,
+    }
+
+    monkeypatch.setattr(
+        routefinder_client_module.RouteFinderClient,
+        "generate_clusters",
+        lambda self, *_args, **_kwargs: (
+            ClusterResult(
+                clusters=[
+                    Cluster(
+                        cluster_id="CL-001",
+                        spbu_ids=["SPBU001", "SPBU002"],
+                        total_demand_kl=24,
+                    )
+                ],
+            ),
+            0.01,
+        ),
+    )
+
+    solve_response = client.post("/api/vrp/solve", json=payload)
+    assert solve_response.status_code == 202
+    body = solve_response.json()
+    assert body["solver_mode"] == "Hybrid: RouteFinder Clustering + OR-Tools"
+
+    detail_response = client.get(f"/api/v1/scenarios/{body['scenario_id']}")
+    assert detail_response.status_code == 200
+    assert detail_response.json()["status"] in {"feasible", "partial"}
+
+    cluster_metrics_response = client.get("/api/vrp/cluster-metrics", params={"scenario_id": body["scenario_id"]})
+    assert cluster_metrics_response.status_code == 200
+    metrics = cluster_metrics_response.json()
+    assert metrics["scenario_id"] == body["scenario_id"]
+    assert metrics["has_cluster_data"] is True
+    assert len(metrics["clusters"]) == 1
+    assert metrics["clusters"][0]["cluster_id"] == "CL-001"
+    assert "summary" in metrics
+    assert metrics["summary"]["total_trips"] >= 1
+    assert metrics["history"][0]["solver_mode"] == "RouteFinder ON"
+
+
+def test_vrp_solve_endpoint_with_routefinder_failure_falls_back(client, sample_payload, monkeypatch):
+    payload = deepcopy(sample_payload)
+    payload["solver_settings"] = {
+        "use_routefinder": True,
+        "cluster_mode": "soft",
+        "max_cluster_size": 5,
+    }
+
+    def _raise_failure(self, *_args, **_kwargs):
+        raise ValueError("RouteFinder down")
+
+    monkeypatch.setattr(routefinder_client_module.RouteFinderClient, "generate_clusters", _raise_failure)
+
+    solve_response = client.post("/api/vrp/solve", json=payload)
+    assert solve_response.status_code == 202
+    body = solve_response.json()
+
+    detail_response = client.get(f"/api/v1/scenarios/{body['scenario_id']}")
+    assert detail_response.status_code == 200
+    assert detail_response.json()["status"] in {"feasible", "partial"}
+
+
+def test_cluster_metrics_empty_state_without_routefinder(client, sample_payload):
+    payload = deepcopy(sample_payload)
+    payload["solver_settings"] = {
+        "use_routefinder": False,
+        "cluster_mode": "soft",
+        "max_cluster_size": 5,
+    }
+
+    solve_response = client.post("/api/vrp/solve", json=payload)
+    assert solve_response.status_code == 202
+    scenario_id = solve_response.json()["scenario_id"]
+
+    cluster_metrics_response = client.get("/api/vrp/cluster-metrics", params={"scenario_id": scenario_id})
+    assert cluster_metrics_response.status_code == 200
+    metrics = cluster_metrics_response.json()
+    assert metrics["has_cluster_data"] is False
+    assert metrics["clusters"] == []
+    assert metrics["edges"] == []
+    assert metrics["history"][0]["solver_mode"] == "RouteFinder OFF"
 
 
 def test_scenario_analysis_lifecycle(client, sample_payload):

@@ -5,17 +5,15 @@ from __future__ import annotations
 import logging
 from uuid import UUID
 
-from ortools.constraint_solver import routing_enums_pb2
 from sqlalchemy.orm import Session
 
 from app.models import schemas
 from app.repositories.result_repository import ResultRepository
 from app.repositories.scenario_repository import ScenarioRepository
 from app.repositories.settings_repository import SettingsRepository
+from app.schemas.solver_setting_schema import SolverSettings
 from app.services.constraint_service import ConstraintService
-from app.services.preprocessing_service import PreprocessingService
-from app.services.result_service import ResultService
-from app.solver.ortools_solver import OrToolsSolver, SolverOutput
+from app.services.solver_orchestrator import SolverOrchestrator
 
 logger = logging.getLogger(__name__)
 
@@ -29,9 +27,7 @@ class OptimizationService:
         self.scenario_repository = ScenarioRepository(db)
         self.result_repository = ResultRepository(db)
         self.constraint_service = ConstraintService()
-        self.preprocessing_service = PreprocessingService()
-        self.solver = OrToolsSolver()
-        self.result_service = ResultService()
+        self.solver_orchestrator = SolverOrchestrator(db)
 
     def _merge_config(self, payload: schemas.OptimizationRequest) -> schemas.OptimizationConfig:
         settings_row = self.settings_repository.get_active()
@@ -42,6 +38,9 @@ class OptimizationService:
             ui_preferences=settings_row.ui_preferences,
         )
         return self.constraint_service.merge_config(settings_payload, payload.optimization_config)
+
+    def resolve_solver_settings(self, request_settings: SolverSettings | None) -> SolverSettings:
+        return self.solver_orchestrator.resolve_solver_settings(request_settings)
 
     def create_job(
         self,
@@ -54,7 +53,7 @@ class OptimizationService:
             schemas.OptimizationJobResponse(
                 scenario_id=UUID(scenario.id),
                 status="processing",
-                message="Optimization is in progress.",
+                message="Waiting for solver worker.",
                 created_at=scenario.created_at,
             ),
             prepared_payload,
@@ -71,48 +70,11 @@ class OptimizationService:
         merged_config = payload.optimization_config or self._merge_config(payload)
 
         try:
-            problem = self.preprocessing_service.preprocess(payload, merged_config)
-            if not problem.shipments and problem.preassigned_unserved:
-                solver_output = SolverOutput(
-                    built_model=None,  # type: ignore[arg-type]
-                    assignment=None,
-                    runtime_seconds=0.0,
-                    message="No feasible shipments remained after preprocessing.",
-                    search_status=routing_enums_pb2.RoutingSearchStatus.ROUTING_INFEASIBLE,
-                )
-                result = schemas.OptimizationResultResponse(
-                    scenario_id=scenario.id,
-                    status="infeasible"
-                    if not merged_config.soft_constraints.allow_unserved_orders
-                    else "preprocessing_failed",
-                    message=solver_output.message,
-                    total_orders=len(payload.orders),
-                    total_demand=problem.total_demand,
-                    total_delivered_demand=0,
-                    total_unserved_orders=len({item.parent_order_id for item in problem.preassigned_unserved}),
-                    active_truck_count=0,
-                    active_truck_type_summary=[],
-                    total_distance=0,
-                    total_time=0,
-                    total_cost=(
-                        len(problem.preassigned_unserved) * merged_config.penalties.unserved_order_penalty
-                        if merged_config.soft_constraints.allow_unserved_orders
-                        else 0
-                    ),
-                    total_penalty=(
-                        len(problem.preassigned_unserved) * merged_config.penalties.unserved_order_penalty
-                        if merged_config.soft_constraints.allow_unserved_orders
-                        else 0
-                    ),
-                    solver_runtime_seconds=0,
-                    objective_config=merged_config,
-                    route_details=[],
-                    unserved_orders=problem.preassigned_unserved,
-                    preprocessing_notes=problem.notes,
-                )
-            else:
-                solver_output = self.solver.solve(problem)
-                result = self.result_service.build_response(scenario.id, problem, solver_output)
+            result = self.solver_orchestrator.solve(
+                scenario=scenario,
+                payload=payload,
+                merged_config=merged_config,
+            )
             self.result_repository.save_result(scenario, result)
         except Exception as exc:
             logger.exception("Optimization failed for scenario %s", scenario.id)

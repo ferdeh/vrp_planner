@@ -4,6 +4,8 @@ import { useForm, type FieldErrors } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useNavigate, useLocation } from "react-router-dom";
 import { useEffect, useRef, useState } from "react";
+import { SolverModeCard } from "../components/SolverModeCard";
+import { SolverRunMetrics } from "../components/SolverRunMetrics";
 import { AppLayout } from "../components/layout/AppLayout";
 import { PageHeader } from "../components/layout/PageHeader";
 import { OrderTableField } from "../components/forms/OrderTableField";
@@ -11,8 +13,8 @@ import { TruckTableField } from "../components/forms/TruckTableField";
 import { OptimizationConfigPanel } from "../components/forms/OptimizationConfigPanel";
 import { useDepotOptions, useSpbuOptions } from "../hooks/useMasterData";
 import { defaultOptimizationConfig } from "../lib/sampleData";
-import { getSettings, listAvailableTrucks, optimize } from "../services/api";
-import type { DepotData, OptimizationRequest, SpbuData, TruckMasterData } from "../types/api";
+import { getSettings, getSolverSettings, listAvailableTrucks, solveVrp } from "../services/api";
+import type { DepotData, OptimizationRequest, SolverSettings, SpbuData, TruckMasterData } from "../types/api";
 
 const SAMPLE_ORDER_VOLUME_KL = 8;
 
@@ -176,6 +178,12 @@ const initialForm: OptimizationRequest = {
   optimization_config: defaultOptimizationConfig,
 };
 
+const defaultSolverSettings: SolverSettings = {
+  use_routefinder: false,
+  cluster_mode: "soft",
+  max_cluster_size: 5,
+};
+
 export function NewOptimizationPage() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -194,6 +202,10 @@ export function NewOptimizationPage() {
   const settingsQuery = useQuery({
     queryKey: ["settings"],
     queryFn: getSettings,
+  });
+  const solverSettingsQuery = useQuery({
+    queryKey: ["solver-settings"],
+    queryFn: getSolverSettings,
   });
   const depotQuery = useDepotOptions();
 
@@ -250,7 +262,7 @@ export function NewOptimizationPage() {
   }, [rerunState, reset]);
 
   const optimizeMutation = useMutation({
-    mutationFn: optimize,
+    mutationFn: solveVrp,
     onSuccess: async (result) => {
       setPreviewRequest(null);
       await queryClient.invalidateQueries({ queryKey: ["scenarios"] });
@@ -393,9 +405,17 @@ export function NewOptimizationPage() {
       start_depot_id: truck.start_depot_id || values.depot_id,
       end_depot_id: truck.end_depot_id || values.depot_id,
     }));
+    const solverSettings = solverSettingsQuery.data
+      ? {
+          use_routefinder: solverSettingsQuery.data.use_routefinder,
+          cluster_mode: solverSettingsQuery.data.cluster_mode,
+          max_cluster_size: solverSettingsQuery.data.max_cluster_size,
+        }
+      : defaultSolverSettings;
     optimizeMutation.mutate({
       ...values,
       available_trucks: nextTrucks,
+      solver_settings: solverSettings,
     });
   };
 
@@ -557,6 +577,13 @@ export function NewOptimizationPage() {
   const trucksErrorMessage = trucksHasError
     ? "Armada belum siap dipakai. Sync truck atau lengkapi data truck yang wajib."
     : null;
+  const activeSolverSettings = solverSettingsQuery.data
+    ? {
+        use_routefinder: solverSettingsQuery.data.use_routefinder,
+        cluster_mode: solverSettingsQuery.data.cluster_mode,
+        max_cluster_size: solverSettingsQuery.data.max_cluster_size,
+      }
+    : defaultSolverSettings;
 
   return (
     <AppLayout>
@@ -569,6 +596,9 @@ export function NewOptimizationPage() {
           </button>
         }
       />
+
+      <SolverModeCard settings={activeSolverSettings} />
+      <SolverRunMetrics settings={activeSolverSettings} />
 
       <form className="space-y-6" onSubmit={openOptimizationPreview}>
         {rerunMessage ? (
@@ -851,6 +881,30 @@ export function NewOptimizationPage() {
                     <div className="flex items-center justify-between rounded-2xl bg-white px-4 py-3">
                       <span>Depot operation time weight</span>
                       <span className="font-semibold text-ink">{previewRequest.optimization_config.penalties.depot_operation_time_weight}</span>
+                    </div>
+                    <div className="flex items-center justify-between rounded-2xl bg-white px-4 py-3">
+                      <span>Idle threshold truck count (%)</span>
+                      <span className="font-semibold text-ink">{previewRequest.optimization_config.penalties.active_truck_idle_threshold_percent_truck_count}</span>
+                    </div>
+                    <div className="flex items-center justify-between rounded-2xl bg-white px-4 py-3">
+                      <span>Idle threshold depot (%)</span>
+                      <span className="font-semibold text-ink">{previewRequest.optimization_config.penalties.active_truck_idle_threshold_percent_depot_operation}</span>
+                    </div>
+                    <div className="flex items-center justify-between rounded-2xl bg-white px-4 py-3">
+                      <span>Soft cross-cluster penalty</span>
+                      <span className="font-semibold text-ink">{previewRequest.optimization_config.penalties.soft_cluster_penalty}</span>
+                    </div>
+                    <div className="flex items-center justify-between rounded-2xl bg-white px-4 py-3">
+                      <span>Hard cross-cluster penalty</span>
+                      <span className="font-semibold text-ink">{previewRequest.optimization_config.penalties.hard_cluster_penalty}</span>
+                    </div>
+                    <div className="flex items-center justify-between rounded-2xl bg-white px-4 py-3">
+                      <span>Active truck idle penalty / minute</span>
+                      <span className="font-semibold text-ink">{previewRequest.optimization_config.penalties.active_truck_idle_penalty_per_minute}</span>
+                    </div>
+                    <div className="flex items-center justify-between rounded-2xl bg-white px-4 py-3">
+                      <span>Unused opportunity capacity penalty / KL</span>
+                      <span className="font-semibold text-ink">{previewRequest.optimization_config.penalties.unused_opportunity_capacity_penalty_per_kl}</span>
                     </div>
                   </div>
                 </div>

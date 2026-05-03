@@ -18,6 +18,7 @@ export function App() {
       <Route path="/scenario-analysis" element={<ScenarioAnalysisPage />} />
       <Route path="/scenarios/compare" element={<ScenarioComparePage />} />
       <Route path="/scenarios/:scenarioId" element={<ScenarioDetailPage />} />
+      <Route path="/solver-settings" element={<Navigate to="/settings" replace />} />
       <Route path="/user-guide" element={<UserGuidePage />} />
       <Route path="/settings" element={<SettingsPage />} />
       <Route path="/version" element={<VersionPage />} />

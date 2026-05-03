@@ -238,3 +238,76 @@ class SystemSettings(Base, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     default_optimization_config: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     ui_preferences: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+
+class VRPSolverSettings(Base, TimestampMixin):
+    __tablename__ = "vrp_solver_settings"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid_str)
+    tenant_id: Mapped[str | None] = mapped_column(String(36), nullable=True, unique=True)
+    use_routefinder: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    cluster_mode: Mapped[str] = mapped_column(String(30), nullable=False, default="soft")
+    max_cluster_size: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
+
+
+class VRPSolverRun(Base):
+    __tablename__ = "vrp_solver_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid_str)
+    scenario_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    solver_mode: Mapped[str] = mapped_column(String(64), nullable=False)
+    routefinder_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    initial_solution_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    final_solution_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    improvement_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    runtime_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class VRPRouteFinderRun(Base):
+    __tablename__ = "vrp_routefinder_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid_str)
+    solver_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("vrp_solver_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False)
+    cluster_mode: Mapped[str] = mapped_column(String(30), nullable=False, default="soft")
+    runtime_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    max_cluster_size: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
+    cluster_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_clustered_demand_kl: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class VRPCluster(Base):
+    __tablename__ = "vrp_clusters"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid_str)
+    scenario_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    cluster_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    spbu_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    total_demand_kl: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class VRPSolutionValidation(Base):
+    __tablename__ = "vrp_solution_validations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid_str)
+    solver_run_id: Mapped[str] = mapped_column(
+        ForeignKey("vrp_solver_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    validation_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    hard_constraint_violations: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    soft_constraint_penalties: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)

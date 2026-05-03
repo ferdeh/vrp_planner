@@ -3,12 +3,16 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { useForm } from "react-hook-form";
+import { RouteFinderAdvancedSettings } from "../components/RouteFinderAdvancedSettings";
+import { RouteFinderToggle } from "../components/RouteFinderToggle";
 import { AppLayout } from "../components/layout/AppLayout";
 import { PageHeader } from "../components/layout/PageHeader";
 import { OptimizationConfigPanel } from "../components/forms/OptimizationConfigPanel";
+import { SolverModeCard } from "../components/SolverModeCard";
+import { SolverRunMetrics } from "../components/SolverRunMetrics";
 import { defaultOptimizationConfig } from "../lib/sampleData";
-import { getSettings, updateSettings } from "../services/api";
-import type { OptimizationRequest, SystemSettingsPayload } from "../types/api";
+import { getSettings, getSolverSettings, updateSettings, updateSolverSettings } from "../services/api";
+import type { OptimizationRequest, SolverSettings, SystemSettingsPayload } from "../types/api";
 
 const costParameterGroups = [
   {
@@ -41,9 +45,35 @@ const costParameterGroups = [
         helper: "Penalty per menit jika operasi depot melewati jendela operasi depot.",
       },
       {
+        path: "penalties.active_truck_idle_penalty_per_minute",
+        label: "Active truck idle penalty / minute",
+        helper: "Penalty saat truck aktif selesai terlalu cepat. Dipakai di mode minimize truck count dan minimize depot operation.",
+      },
+      {
+        path: "penalties.unused_opportunity_capacity_penalty_per_kl",
+        label: "Unused opportunity capacity penalty / KL",
+        helper: "Penalty untuk kapasitas trip/reload yang terlanjur dijalankan tetapi tidak termanfaatkan. Dipakai di mode minimize depot operation.",
+      },
+      {
         path: "penalties.capacity_violation_penalty",
         label: "Capacity violation penalty",
         helper: "Disimpan untuk roadmap. Saat ini kapasitas masih diperlakukan hard oleh solver.",
+      },
+    ],
+  },
+  {
+    title: "Threshold Utilisasi Truck Aktif",
+    description: "Threshold ini menentukan minimal proporsi jam kerja yang dianggap cukup untuk truck aktif pada masing-masing objective utama.",
+    items: [
+      {
+        path: "penalties.active_truck_idle_threshold_percent_truck_count",
+        label: "Idle threshold truck count (%)",
+        helper: "Dipakai saat objective utama minimize truck count. Default 50 berarti truck aktif mulai kena penalty bila kerja di bawah 50% window efektifnya.",
+      },
+      {
+        path: "penalties.active_truck_idle_threshold_percent_depot_operation",
+        label: "Idle threshold depot (%)",
+        helper: "Dipakai saat objective utama minimize depot operation. Default 75 berarti truck aktif diharapkan bekerja minimal 75% window efektifnya.",
       },
     ],
   },
@@ -78,11 +108,23 @@ const costParameterGroups = [
 const schema = z.object({
   default_optimization_config: z.any(),
   ui_preferences: z.record(z.string(), z.unknown()),
+  solver_settings: z.object({
+    use_routefinder: z.boolean(),
+    cluster_mode: z.enum(["soft", "hard"]),
+    max_cluster_size: z.number().int().min(3).max(6),
+  }),
 });
 
 type FormValue = {
   default_optimization_config: OptimizationRequest["optimization_config"];
   ui_preferences: Record<string, unknown>;
+  solver_settings: SolverSettings;
+};
+
+const defaultSolverSettings: SolverSettings = {
+  use_routefinder: false,
+  cluster_mode: "soft",
+  max_cluster_size: 5,
 };
 
 export function SettingsPage() {
@@ -91,29 +133,52 @@ export function SettingsPage() {
     queryKey: ["settings"],
     queryFn: getSettings,
   });
+  const solverSettingsQuery = useQuery({
+    queryKey: ["solver-settings"],
+    queryFn: getSolverSettings,
+  });
   const form = useForm<FormValue>({
     resolver: zodResolver(schema),
     defaultValues: {
       default_optimization_config: defaultOptimizationConfig,
       ui_preferences: {},
+      solver_settings: defaultSolverSettings,
     },
   });
 
   useEffect(() => {
-    if (settingsQuery.data) {
+    if (settingsQuery.data || solverSettingsQuery.data) {
       form.reset({
-        default_optimization_config: settingsQuery.data.default_optimization_config,
-        ui_preferences: settingsQuery.data.ui_preferences,
+        default_optimization_config: settingsQuery.data?.default_optimization_config ?? defaultOptimizationConfig,
+        ui_preferences: settingsQuery.data?.ui_preferences ?? {},
+        solver_settings: solverSettingsQuery.data
+          ? {
+              use_routefinder: solverSettingsQuery.data.use_routefinder,
+              cluster_mode: solverSettingsQuery.data.cluster_mode,
+              max_cluster_size: solverSettingsQuery.data.max_cluster_size,
+            }
+          : defaultSolverSettings,
       });
     }
-  }, [form, settingsQuery.data]);
+  }, [form, settingsQuery.data, solverSettingsQuery.data]);
 
   const mutation = useMutation({
-    mutationFn: (payload: SystemSettingsPayload) => updateSettings(payload),
+    mutationFn: async (values: FormValue) => {
+      const settingsPayload: SystemSettingsPayload = {
+        default_optimization_config: values.default_optimization_config,
+        ui_preferences: values.ui_preferences,
+      };
+      await updateSettings(settingsPayload);
+      await updateSolverSettings(values.solver_settings);
+    },
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["settings"] });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["settings"] }),
+        queryClient.invalidateQueries({ queryKey: ["solver-settings"] }),
+      ]);
     },
   });
+  const solverSettings = form.watch("solver_settings");
 
   return (
     <AppLayout>
@@ -151,6 +216,22 @@ export function SettingsPage() {
               </p>
             </div>
 
+            <div className="flex justify-end">
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => {
+                  Object.entries(defaultOptimizationConfig.penalties).forEach(([key, value]) => {
+                    form.setValue(`default_optimization_config.penalties.${key}` as never, value as never, {
+                      shouldDirty: true,
+                    });
+                  });
+                }}
+              >
+                Reset parameter solver ke default
+              </button>
+            </div>
+
             <div className="rounded-[24px] border border-sky-200 bg-sky-50/80 p-5 text-sm leading-6 text-sky-950">
               Cost truck default sekarang berasal dari internal app untuk komponen variable:
               <span className="font-semibold"> variable cost vehicle per km</span> dan
@@ -185,9 +266,94 @@ export function SettingsPage() {
           </div>
         </section>
 
+        <SolverModeCard settings={solverSettings} />
+        <SolverRunMetrics settings={solverSettings} />
+
+        <section className="panel">
+          <div className="panel-body space-y-6">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.32em] text-sky-600">RouteFinder Settings</p>
+              <h2 className="mt-3 text-2xl font-semibold text-ink">Default Solver Mode</h2>
+              <p className="mt-3 max-w-4xl text-sm leading-6 text-slate-600">
+                Semua pengaturan hybrid RouteFinder dipindahkan ke sini. Nilai ini akan ikut tersimpan bersama settings global
+                saat Anda menekan tombol simpan di bawah.
+              </p>
+            </div>
+
+            <RouteFinderToggle
+              register={(name: string, options?: Record<string, unknown>) =>
+                form.register(name as never, options as never)
+              }
+              watch={form.watch}
+              prefix="solver_settings"
+            />
+            <RouteFinderAdvancedSettings
+              register={(name: string, options?: Record<string, unknown>) =>
+                form.register(name as never, options as never)
+              }
+              watch={form.watch}
+              prefix="solver_settings"
+            />
+
+            <div className="grid gap-4 lg:grid-cols-2">
+              <label className="rounded-[22px] border border-slate-200 bg-white p-5 shadow-sm">
+                <span className="block text-sm font-semibold text-ink">Soft cross-cluster penalty</span>
+                <span className="mt-2 block text-sm leading-6 text-slate-600">
+                  Penalty perpindahan shipment ke shipment antar cluster RouteFinder saat cluster mode `soft`.
+                </span>
+                <input
+                  type="number"
+                  min="0"
+                  className="input mt-4"
+                  {...form.register("default_optimization_config.penalties.soft_cluster_penalty" as never, {
+                    valueAsNumber: true,
+                  })}
+                />
+              </label>
+
+              <label className="rounded-[22px] border border-slate-200 bg-white p-5 shadow-sm">
+                <span className="block text-sm font-semibold text-ink">Hard cross-cluster penalty</span>
+                <span className="mt-2 block text-sm leading-6 text-slate-600">
+                  Penalty perpindahan shipment ke shipment antar cluster RouteFinder saat cluster mode `hard`. Nilai ini
+                  tetap berupa objective penalty, bukan hard constraint absolut.
+                </span>
+                <input
+                  type="number"
+                  min="0"
+                  className="input mt-4"
+                  {...form.register("default_optimization_config.penalties.hard_cluster_penalty" as never, {
+                    valueAsNumber: true,
+                  })}
+                />
+              </label>
+            </div>
+
+            <div className="flex justify-end">
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => {
+                  form.setValue(
+                    "default_optimization_config.penalties.soft_cluster_penalty" as never,
+                    defaultOptimizationConfig.penalties.soft_cluster_penalty as never,
+                    { shouldDirty: true },
+                  );
+                  form.setValue(
+                    "default_optimization_config.penalties.hard_cluster_penalty" as never,
+                    defaultOptimizationConfig.penalties.hard_cluster_penalty as never,
+                    { shouldDirty: true },
+                  );
+                }}
+              >
+                Reset cross-cluster penalty ke default
+              </button>
+            </div>
+          </div>
+        </section>
+
         <div className="flex items-center justify-between">
           <p className="text-sm text-slate-500">
-            Default ini akan di-merge ke setiap request optimisasi baru.
+            Default ini akan di-merge ke setiap request optimisasi baru, termasuk mode RouteFinder.
           </p>
           <button type="submit" className="btn-primary" disabled={mutation.isPending}>
             {mutation.isPending ? "Menyimpan..." : "Simpan Settings"}

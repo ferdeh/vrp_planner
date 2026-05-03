@@ -4,7 +4,10 @@ MVP full stack untuk optimisasi dispatch distribusi BBM dari depot ke SPBU. Apli
 
 Dokumentasi teknis tambahan:
 
+- [solver.md](/Users/ferdiansyahzulkarnain/Documents/my Dev/vrp_planner/solver.md)
 - [docs/solver-pipeline.md](/Users/ferdiansyahzulkarnain/Documents/my Dev/vrp_planner/docs/solver-pipeline.md)
+
+`solver.md` adalah referensi utama untuk detail logika solver yang berjalan saat ini, termasuk pipeline solve, rumus objective, rumus penalty, multi-trip reload, dan perbedaan perilaku antar mode objective.
 
 ## 1. Konteks bisnis
 
@@ -37,8 +40,60 @@ Alur utama:
 1. User input order, truck, dan constraint di web.
 2. Backend merge request config dengan default global settings.
 3. Preprocessing mengambil master data dan matriks network dari service eksternal atau mock mode.
-4. OR-Tools routing solver mencari kombinasi truck dan rute terbaik.
-5. Hasil disimpan ke PostgreSQL dan ditampilkan kembali di frontend.
+4. `solver_orchestrator` membangun canonical VRP model dan, bila diaktifkan, meminta RouteFinder membentuk cluster SPBU.
+5. OR-Tools routing solver tetap menjadi final optimizer. Cluster RouteFinder hanya dipakai sebagai bias objective lewat cross-cluster penalty, bukan sebagai route final yang wajib diikuti.
+6. Hasil disimpan ke PostgreSQL dan ditampilkan kembali di frontend.
+
+## 3a. Arsitektur hybrid RouteFinder + OR-Tools
+
+- `RouteFinder` hanya berperan sebagai `SPBU clustering service`.
+- `OR-Tools` tetap menjadi final optimizer/backbone solver.
+- `solution_validator` menjadi final gatekeeper.
+- Feature default `OFF`.
+- Bila RouteFinder timeout atau error, backend fallback ke `OR-Tools only`.
+
+Komponen backend hybrid:
+
+- `backend/app/services/solver_orchestrator.py`
+- `backend/app/services/routefinder_client.py`
+- `backend/app/services/routefinder_cluster_service.py`
+- `backend/app/services/solution_validator.py`
+- `backend/app/services/solver_metrics_service.py`
+- `backend/app/services/canonical_builder.py`
+
+API contract hybrid:
+
+- `GET /api/vrp/solver-settings`
+- `PUT /api/vrp/solver-settings`
+- `POST /api/vrp/solve`
+- `POST /routefinder/generate-clusters` untuk service RouteFinder internal
+
+Default solver settings:
+
+```json
+{
+  "use_routefinder": false,
+  "cluster_mode": "soft",
+  "max_cluster_size": 5
+}
+```
+
+Default cross-cluster penalty yang ikut di-merge ke request optimisasi:
+
+```json
+{
+  "soft_cluster_penalty": 50000,
+  "hard_cluster_penalty": 5000000
+}
+```
+
+Catatan penting:
+
+- `cluster_mode = "soft"` memakai `soft_cluster_penalty`
+- `cluster_mode = "hard"` memakai `hard_cluster_penalty`
+- mode `hard` saat ini tetap berupa penalty objective yang sangat besar, bukan hard constraint absolut
+- penalty hanya berlaku untuk arc `shipment -> shipment` yang berpindah cluster
+- perpindahan lewat `depot` atau `reload` tidak dikenai penalty cluster
 
 ## 4. Batasan MVP
 
@@ -104,6 +159,11 @@ TRUCK_MASTER_DATA_API_BASE_URL=http://truck-backend:8000
 PLANNER_PUBLIC_BASE_URL=http://planner.localhost:8088
 PLANNER_AUTH_LOGOUT_URL=http://auth.localhost:8088/realms/vrp-platform/protocol/openid-connect/logout
 PLANNER_OAUTH_CLIENT_ID=oauth2-proxy-planner
+SOLVER_BACKBONE=ortools
+ROUTEFINDER_SERVICE_URL=http://vrp-routefinder-service:8090
+ROUTEFINDER_DEFAULT_ENABLED=false
+ROUTEFINDER_CLUSTER_MODE=soft
+ROUTEFINDER_MAX_CLUSTER_SIZE=5
 ```
 
 Frontend tidak lagi diarahkan ke `localhost:8080`. Dalam mode terintegrasi, browser memakai same-origin `/api/...` dan Nginx planner meneruskan request itu ke `planner-backend`.
@@ -149,7 +209,32 @@ cd backend
 alembic revision --autogenerate -m "your message"
 ```
 
-## 10. Integrasi external API
+## 10. Canonical VRP dan benchmark hybrid
+
+Canonical request yang dikirim ke RouteFinder mengikuti bentuk ini:
+
+```json
+{
+  "scenario": {},
+  "nodes": [],
+  "vehicles": [],
+  "orders": [],
+  "matrices": {},
+  "constraints": {},
+  "settings": {}
+}
+```
+
+Canonical model minimal membawa `scenario_id`, `planning_date`, `depot_codes`, node depot dan SPBU, vehicles, depot assignment, truck category, capacity, compartments, orders/shipment, product code, quantity KL, matrix distance/duration, time windows, allowed truck categories, supply depot compatibility, max working minutes, max trips, dan constraint config.
+
+Benchmark `OR-Tools only` vs `Hybrid`:
+
+1. Simpan solver setting dengan `use_routefinder=false`, lalu jalankan `POST /api/vrp/solve`.
+2. Aktifkan `use_routefinder=true`, atur `cluster_mode` dan `max_cluster_size`, lalu jalankan payload yang sama.
+3. Bandingkan `solver_mode`, `runtime_seconds`, `active_truck_count`, `total_cost`, `total_penalty`, `total_unserved_orders`, dan metrik cluster pada detail scenario.
+4. Review fallback dan histori RouteFinder lewat tabel `vrp_solver_runs`, `vrp_routefinder_runs`, dan `vrp_routefinder_clusters`.
+
+## 11. Integrasi external API
 
 Default base URL backend:
 
@@ -168,7 +253,7 @@ Path yang dikonsumsi backend:
 
 Path-path ini configurable via environment variable pada backend config.
 
-## 11. Visual route map
+## 12. Visual route map
 
 Tab `Route Map` pada detail skenario sekarang memakai graph masterdata SPBU, bukan lagi layout linear per truck.
 
@@ -195,7 +280,7 @@ Catatan:
 - jika `travel_path` mengandung edge yang tidak ditemukan di `effective edges`, sistem tetap menggambar fallback edge agar jalur truck tetap terbaca
 - garis overlay `solid` menunjukkan leg perjalanan utama truck, sedangkan garis `putus-putus` menunjukkan `return_path` atau perjalanan kembali
 
-## 12. Mock mode
+## 13. Mock mode
 
 Jika service eksternal belum tersedia, aktifkan:
 
@@ -205,7 +290,9 @@ USE_MOCK_MASTER_DATA=true
 
 Mock mode menyediakan depot, SPBU, dan matriks network sintetis berbasis koordinat mock.
 
-## 13. Panduan objective, parameter, dan constraint
+## 14. Panduan objective, parameter, dan constraint
+
+Untuk penjelasan detail implementasi solver, rumus objective, dan rumus penalty yang benar-benar dipakai backend, lihat [solver.md](/Users/ferdiansyahzulkarnain/Documents/my Dev/vrp_planner/solver.md).
 
 Bagian ini ditujukan sebagai petunjuk user operasional saat mengisi form optimisasi.
 
@@ -296,7 +383,7 @@ Bagian ini ditujukan sebagai petunjuk user operasional saat mengisi form optimis
   Field turunan yang dikembalikan backend untuk menandai apakah pipeline solver boleh turun ke partial fallback. Nilainya mengikuti `soft_constraints.allow_unserved_orders`.
 
 - `unserved_order_penalty`
-  Penalti untuk setiap shipment yang tidak terlayani saat `Allow unserved` aktif. Order priority hanya boleh memakai rule ini bila `SPBU Priority` tidak aktif sebagai hard maupun soft.
+  Penalti untuk setiap shipment yang tidak terlayani saat `Allow unserved` aktif. Order priority hanya boleh memakai rule ini bila `SPBU Priority` tidak aktif sebagai hard maupun soft. Default global terbaru adalah `1,000,000,000`.
 
 - `late_arrival_penalty_per_minute`
   Penalti per menit keterlambatan terhadap `TW End` SPBU master data saat `Time window SPBU` dipakai sebagai soft constraint.
@@ -309,6 +396,24 @@ Bagian ini ditujukan sebagai petunjuk user operasional saat mengisi form optimis
 
 - `depot_operation_window_penalty_per_minute`
   Penalti per menit pelanggaran jendela operasi depot bila `Depot operation window` dipakai sebagai soft constraint.
+
+- `soft_cluster_penalty`
+  Penalti untuk arc `shipment -> shipment` yang berpindah cluster RouteFinder saat `cluster_mode = soft`.
+
+- `hard_cluster_penalty`
+  Penalti besar untuk arc `shipment -> shipment` yang berpindah cluster RouteFinder saat `cluster_mode = hard`. Ini tetap berupa objective penalty, bukan larangan absolut.
+
+- `active_truck_idle_penalty_per_minute`
+  Penalti per menit kekurangan jam kerja minimum truck aktif. Saat ini aktif pada mode `Minimize truck count` dan `Minimize depot operation time`. Default global terbaru adalah `4000`.
+
+- `unused_opportunity_capacity_penalty_per_kl`
+  Penalti per KL kapasitas trip/reload yang sudah dijalankan tetapi tidak termanfaatkan. Saat ini hanya aktif pada mode `Minimize depot operation time`. Default global terbaru adalah `60000`.
+
+- `active_truck_idle_threshold_percent_truck_count`
+  Threshold minimum jam kerja truck aktif saat objective utama `Minimize truck count`. Default `50%`.
+
+- `active_truck_idle_threshold_percent_depot_operation`
+  Threshold minimum jam kerja truck aktif saat objective utama `Minimize depot operation time`. Default `75%`.
 
 - `capacity_violation_penalty`
   Saat ini hanya disimpan untuk roadmap. Solver MVP masih memperlakukan kapasitas sebagai hard constraint.
@@ -334,9 +439,20 @@ Bagian ini ditujukan sebagai petunjuk user operasional saat mengisi form optimis
 - `solver_options.local_search_metaheuristic`
   Strategi perbaikan solusi setelah solusi awal ditemukan.
 
+- `use_routefinder`
+  Mengaktifkan atau mematikan RouteFinder clustering sebelum OR-Tools menyusun route akhir.
+
+- `cluster_mode`
+  Menentukan apakah cross-cluster penalty memakai nilai `soft` atau `hard`.
+
+- `max_cluster_size`
+  Membatasi jumlah maksimum SPBU per cluster RouteFinder. UI saat ini membatasi nilai ini ke rentang `3..6`.
+
 ### Cara solver memprioritaskan objective
 
 Objective pada form bisa diurutkan dengan drag and drop. Urutan paling atas diprioritaskan lebih dulu. Namun agar perilaku solver lebih real secara operasional, backend sekarang tidak langsung mencampur semua objective dalam satu pass.
+
+Detail rumus solver, pipeline multi-pass, serta logika penalty utilisasi truck aktif dijelaskan di [solver.md](./solver.md).
 
 Urutan solve yang dipakai:
 
@@ -347,7 +463,7 @@ Urutan solve yang dipakai:
   Jika full-service ditemukan, solusi tersebut dipakai sebagai seed untuk mengoptimalkan objective biaya, jarak, waktu, dan objective lain tanpa boleh drop order.
 
 - Tahap 3, `best-effort partial fallback`
-  Jika full-service gagal dan `Allow unserved` aktif, solver turun ke mode partial dengan penalti unserved sangat besar untuk mencari partial solution terbaik.
+  Jika full-service gagal dan `Allow unserved` aktif, solver turun ke mode partial dengan penalti unserved sangat besar untuk mencari partial solution terbaik. Pada phase awal ini, penalty soft lain dinetralkan dulu agar search fokus memaksimalkan served demand.
 
 - Tahap 4, `repair dan targeted cleanup`
   Dari partial solution yang sudah ada, solver menjalankan seeded repair untuk order sisa. Shipment unserved diprioritaskan ke truck dengan jam kerja aktual paling rendah atau slack waktu terbaik.
@@ -359,11 +475,52 @@ Urutan solve yang dipakai:
   Jika local search masih buntu, backend membangun seed route residual secara eksplisit dengan pola `reload -> shipment residual`, lalu menyerahkannya kembali ke OR-Tools sebagai seed.
 
 - Tahap 7, `final objective refinement`
-  Setelah coverage terbaik ditemukan, solver menjalankan refinement akhir untuk objective penuh seperti truck count, distance, time, dan depot operation time sesuai urutan prioritas user.
+  Setelah coverage terbaik ditemukan, solver menjalankan refinement akhir untuk objective penuh seperti truck count, distance, time, depot operation time, dan penalty soft lain sesuai urutan prioritas user.
 
 Jika objective primer jatuh ke `Minimize depot operation time`, refinement akhir juga mendorong solver meminimalkan span operasi depot aktual, bukan hanya total waktu perjalanan truck.
 
+Perubahan terbaru pada perilaku objective:
+
+- `Minimize truck count`
+  Truck aktif yang selesai terlalu cepat dianggap mahal.
+  Trip yang underfilled tidak otomatis dianggap mahal, karena target utamanya adalah memaksimalkan pemakaian truck yang sudah aktif tanpa memaksa fill rate sempurna.
+
+- `Minimize depot operation time`
+  Truck aktif yang selesai terlalu cepat tetap dianggap mahal.
+  Trip atau reload yang underfilled juga dianggap mahal, karena aktivitas depot tambahan yang tidak produktif akan memperpanjang span operasi depot.
+
 Artinya, objective seperti `Minimize truck count` atau `Minimize depot operation time` tidak boleh lagi mengalahkan target dasar untuk tetap mengirim order bila masih ada peluang operasional.
+
+### RouteFinder settings di UI
+
+Semua pengaturan RouteFinder sekarang berada di halaman `Settings dan Constraints`, tepat di bagian paling bawah setelah kelompok `Default Cost dan Penalty`.
+
+Field yang tersedia:
+
+- `Use RouteFinder Clustering`
+- `Cluster Mode`
+- `Max Cluster Size`
+- `Soft cross-cluster penalty`
+- `Hard cross-cluster penalty`
+
+Perilaku UI saat ini:
+
+- tombol simpan RouteFinder sudah digabung ke tombol `Simpan Settings`
+- tombol `Reset cross-cluster penalty ke default` akan mengembalikan nilai ke `50000` dan `5000000`
+- route lama `/solver-settings` diarahkan ke `/settings`
+
+### Cara membaca detail scenario terbaru
+
+Halaman `Scenario Detail` sekarang dibagi sebagai berikut:
+
+- `Scenario Summary`
+  Menampilkan KPI utama, cost breakdown, penalty breakdown, grafik armada, lalu card `Cluster Metrics` di bawah grafik armada.
+- `Order Detail`
+  Menampilkan daftar seluruh order dan status served/unserved yang sebelumnya ada di summary.
+- `Scenario Analysis`
+  Menampilkan diagnosis level 1 dan level 2.
+- `Route Grafik`, `Route Map`, `Route per MT`, dan `Lainnya`
+  Tetap dipakai untuk pembacaan detail route dan parameter input.
 
 ### Hard constraint
 

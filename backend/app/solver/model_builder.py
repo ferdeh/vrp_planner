@@ -20,7 +20,6 @@ from app.solver.constraints import (
 )
 from app.solver.objective import transit_cost, vehicle_fixed_cost
 
-
 @dataclass
 class BuiltModel:
     manager: pywrapcp.RoutingIndexManager
@@ -63,7 +62,7 @@ def build_routing_model_with_options(
                 travel_time,
                 problem.trucks[vehicle_id],
                 problem.config,
-            )
+            ) + cluster_penalty(problem, from_detail, to_detail)
 
         callback_index = routing.RegisterTransitCallback(vehicle_cost)
         routing.SetArcCostEvaluatorOfVehicle(callback_index, vehicle_id)
@@ -91,3 +90,19 @@ def build_routing_model_with_options(
         extra_objective_vars=time_artifacts.extra_objective_vars,
         extra_objective_weights=time_artifacts.extra_objective_weights,
     )
+
+
+def cluster_penalty(problem: PreprocessedProblem, from_node, to_node) -> int:
+    if not problem.use_routefinder or not problem.clusters:
+        return 0
+    if from_node is None or to_node is None:
+        return 0
+    if from_node.node_kind != "shipment" or to_node.node_kind != "shipment":
+        return 0
+    if not from_node.cluster_id or not to_node.cluster_id:
+        return 0
+    if from_node.cluster_id == to_node.cluster_id:
+        return 0
+    if str(problem.cluster_mode).lower() == "hard":
+        return max(0, int(round(problem.config.penalties.hard_cluster_penalty)))
+    return max(0, int(round(problem.config.penalties.soft_cluster_penalty)))

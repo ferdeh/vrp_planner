@@ -5,10 +5,11 @@ from __future__ import annotations
 from datetime import datetime
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from app.models import schemas
+from app.schemas.routefinder_cluster_schema import Cluster
 from app.services.master_data_client import MasterDataClient
 from app.services.network_client import NetworkClient, NetworkDataError
 from app.utils.time_utils import clamp_window, hhmm_to_minutes
@@ -37,6 +38,7 @@ class RouteNode:
     reload_compartment_count: int = 0
     reload_vehicle_index: int | None = None
     reload_trip_number: int | None = None
+    cluster_id: str | None = None
 
 
 @dataclass
@@ -58,6 +60,10 @@ class PreprocessedProblem:
     time_matrix: list[list[int]]
     distance_matrix: list[list[int]]
     matrix_positions: dict[str, int]
+    vehicle_min_cycle_minutes: list[int] = field(default_factory=list)
+    clusters: list[Cluster] = field(default_factory=list)
+    cluster_mode: str = "soft"
+    use_routefinder: bool = False
 
     @property
     def total_demand(self) -> float:
@@ -169,9 +175,17 @@ class PreprocessingService:
         matrix_positions: dict[str, int],
         starting_node_index: int,
     ) -> list[RouteNode]:
+        remaining_deficit = max(0.0, self._total_order_demand(payload.orders) - sum(truck.capacity_kl for truck in available_trucks))
+        if remaining_deficit <= 0:
+            return []
+
         reload_nodes: list[RouteNode] = []
         next_node_index = starting_node_index
-        for vehicle_index, truck in enumerate(available_trucks):
+        vehicle_trip_limits: list[tuple[int, schemas.TruckInput, int]] = []
+        for vehicle_index, truck in sorted(
+            enumerate(available_trucks),
+            key=lambda item: (item[1].capacity_kl, item[0]),
+        ):
             compatible_shipments = self._vehicle_compatible_shipments(shipments, vehicle_index)
             max_trip_count = self._estimate_vehicle_max_trip_count(
                 payload,
@@ -181,7 +195,16 @@ class PreprocessingService:
                 time_matrix,
                 matrix_positions,
             )
-            for trip_number in range(2, max_trip_count + 1):
+            if compatible_shipments and max_trip_count > 1:
+                vehicle_trip_limits.append((vehicle_index, truck, max_trip_count))
+
+        next_trip_number_by_vehicle = {vehicle_index: 2 for vehicle_index, _truck, _max_trip_count in vehicle_trip_limits}
+        while remaining_deficit > 0:
+            progressed = False
+            for vehicle_index, truck, max_trip_count in vehicle_trip_limits:
+                trip_number = next_trip_number_by_vehicle[vehicle_index]
+                if trip_number > max_trip_count or remaining_deficit <= 0:
+                    continue
                 next_node_index += 1
                 reload_nodes.append(
                     RouteNode(
@@ -203,7 +226,18 @@ class PreprocessingService:
                         reload_trip_number=trip_number,
                     )
                 )
+                next_trip_number_by_vehicle[vehicle_index] += 1
+                remaining_deficit = max(0.0, remaining_deficit - truck.capacity_kl)
+                progressed = True
+                if remaining_deficit <= 0:
+                    break
+            if not progressed:
+                break
         return reload_nodes
+
+    @staticmethod
+    def _total_order_demand(orders: list[schemas.OrderInput]) -> float:
+        return round(sum(order.demand_kl for order in orders), 6)
 
     def preprocess(
         self,
@@ -449,6 +483,17 @@ class PreprocessingService:
             len(preassigned_unserved),
         )
 
+        vehicle_min_cycle_minutes = [
+            self._estimate_vehicle_min_cycle_minutes(
+                payload,
+                truck,
+                self._vehicle_compatible_shipments(shipments, vehicle_index),
+                time_matrix_response.matrix,
+                matrix_positions,
+            )
+            for vehicle_index, truck in enumerate(available_trucks)
+        ]
+
         return PreprocessedProblem(
             depot_id=payload.depot_id,
             depot_name=depot_name,
@@ -467,6 +512,7 @@ class PreprocessingService:
             time_matrix=time_matrix_response.matrix,
             distance_matrix=distance_matrix_response.matrix,
             matrix_positions=matrix_positions,
+            vehicle_min_cycle_minutes=vehicle_min_cycle_minutes,
         )
 
     def _filter_dispatch_available_trucks(

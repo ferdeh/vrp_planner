@@ -9,6 +9,8 @@ from uuid import UUID
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.schemas.solver_setting_schema import SolverSettings
+
 
 SolutionStatus = Literal[
     "processing",
@@ -191,11 +193,17 @@ class SoftConstraintConfig(BaseModel):
 
 
 class PenaltyConfig(BaseModel):
-    unserved_order_penalty: float = 100000
+    unserved_order_penalty: float = 1000000000
     late_arrival_penalty_per_minute: float = 100
     priority_eta_penalty_per_minute: float = 200
     overtime_penalty_per_minute: float = 50
     depot_operation_window_penalty_per_minute: float = 50
+    soft_cluster_penalty: float = 50000
+    hard_cluster_penalty: float = 5000000
+    active_truck_idle_penalty_per_minute: float = 4000
+    unused_opportunity_capacity_penalty_per_kl: float = 60000
+    active_truck_idle_threshold_percent_truck_count: float = Field(default=50, ge=0, le=100)
+    active_truck_idle_threshold_percent_depot_operation: float = Field(default=75, ge=0, le=100)
     capacity_violation_penalty: float = 0
     activation_cost_vehicle: float = Field(
         default=10000,
@@ -260,6 +268,7 @@ class OptimizationRequest(BaseModel):
     orders: list[OrderInput]
     available_trucks: list[TruckInput]
     optimization_config: OptimizationConfig | None = None
+    solver_settings: SolverSettings | None = None
 
     @field_validator("orders")
     @classmethod
@@ -377,6 +386,8 @@ class CostBreakdown(BaseModel):
     distance_cost_total: float = 0
     time_cost_total: float = 0
     depot_operation_cost_total: float = 0
+    active_truck_idle_penalty_total: float = 0
+    unused_opportunity_capacity_penalty_total: float = 0
     late_arrival_penalty_total: float = 0
     priority_eta_penalty_total: float = 0
     overtime_penalty_total: float = 0
@@ -424,6 +435,7 @@ class ScenarioListItem(BaseModel):
     dispatch_date: date
     depot_id: str
     status: SolutionStatus
+    status_message: str | None = None
     total_demand: float
     total_delivered_demand: float
     active_truck_count: int

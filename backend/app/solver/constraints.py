@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 
 from ortools.constraint_solver import pywrapcp
 
 from app.models import schemas
 from app.services.preprocessing_service import PreprocessedProblem
-from app.solver.objective import effective_unserved_penalty, objective_priority_scale
+from app.solver.objective import (
+    UNUSED_CAPACITY_SCALE,
+    active_truck_idle_penalty_enabled,
+    active_truck_idle_target_minutes,
+    effective_unserved_penalty,
+    objective_priority_scale,
+    unused_opportunity_capacity_penalty_enabled,
+    utilization_objective_scale,
+)
 from app.utils.time_utils import hhmm_to_minutes
 
 
@@ -162,6 +171,7 @@ def apply_time_constraints(
     route_end_vars: list[pywrapcp.IntVar] = []
     extra_objective_vars: list[pywrapcp.IntVar] = []
     extra_objective_weights: list[int] = []
+    utilization_scale = max(1, utilization_objective_scale(problem.config))
     depot_operation_weight = max(
         0,
         int(
@@ -171,6 +181,39 @@ def apply_time_constraints(
             )
         ),
     )
+    idle_penalty_per_minute = max(
+        0,
+        int(round(problem.config.penalties.active_truck_idle_penalty_per_minute)),
+    )
+    unused_capacity_penalty_per_kl = max(
+        0,
+        int(round(problem.config.penalties.unused_opportunity_capacity_penalty_per_kl)),
+    )
+    delivered_dimension: pywrapcp.RoutingDimension | None = None
+    if (
+        unused_opportunity_capacity_penalty_enabled(problem.config)
+        and unused_capacity_penalty_per_kl > 0
+    ):
+        def delivered_load_callback(from_index: int) -> int:
+            node = manager.IndexToNode(from_index)
+            detail = problem.get_node(node)
+            if detail is None or detail.node_kind != "shipment":
+                return 0
+            return int(round(detail.demand_kl * UNUSED_CAPACITY_SCALE))
+
+        delivered_load_index = routing.RegisterUnaryTransitCallback(delivered_load_callback)
+        max_delivered = max(
+            1,
+            int(round(problem.total_demand * UNUSED_CAPACITY_SCALE)),
+        )
+        routing.AddDimension(
+            delivered_load_index,
+            0,
+            max_delivered,
+            True,
+            "DeliveredLoad",
+        )
+        delivered_dimension = routing.GetDimensionOrDie("DeliveredLoad")
 
     def register_depot_operation_window(
         condition: pywrapcp.IntVar,
@@ -258,6 +301,93 @@ def apply_time_constraints(
                 shift_start + problem.config.max_route_duration_minutes,
                 int(problem.config.penalties.overtime_penalty_per_minute),
             )
+
+        if active_truck_idle_penalty_enabled(problem.config) and idle_penalty_per_minute > 0:
+            min_cycle_minutes = (
+                problem.vehicle_min_cycle_minutes[vehicle_id]
+                if vehicle_id < len(problem.vehicle_min_cycle_minutes)
+                else 0
+            )
+            idle_target_minutes = active_truck_idle_target_minutes(
+                truck,
+                problem.config,
+                min_cycle_minutes=min_cycle_minutes,
+            )
+            if idle_target_minutes > 0:
+                route_work_minutes = solver.IntVar(
+                    0,
+                    horizon + problem.depot_service_time_minutes,
+                    f"route_work_minutes_{vehicle_id}",
+                )
+                idle_shortfall = solver.IntVar(
+                    0,
+                    idle_target_minutes,
+                    f"idle_shortfall_{vehicle_id}",
+                )
+                idle_penalty_cost = solver.IntVar(
+                    0,
+                    idle_target_minutes * idle_penalty_per_minute,
+                    f"idle_penalty_cost_{vehicle_id}",
+                )
+                solver.Add(
+                    route_work_minutes
+                    == (end_var - start_var)
+                    + (active_vehicle * problem.depot_service_time_minutes)
+                )
+                solver.Add(idle_shortfall == solver.Max(idle_target_minutes - route_work_minutes, 0))
+                solver.Add(idle_shortfall <= idle_target_minutes * active_vehicle)
+                solver.Add(idle_penalty_cost == idle_shortfall * idle_penalty_per_minute)
+                extra_objective_vars.append(idle_penalty_cost)
+                extra_objective_weights.append(utilization_scale)
+
+        if (
+            delivered_dimension is not None
+            and unused_opportunity_capacity_penalty_enabled(problem.config)
+            and unused_capacity_penalty_per_kl > 0
+        ):
+            vehicle_reload_indices = [
+                manager.NodeToIndex(node.node_index)
+                for node in problem.reload_nodes
+                if node.reload_vehicle_index == vehicle_id
+            ]
+            used_reload_count = solver.IntVar(
+                0,
+                len(vehicle_reload_indices),
+                f"used_reload_count_{vehicle_id}",
+            )
+            if vehicle_reload_indices:
+                solver.Add(
+                    used_reload_count
+                    == solver.Sum([routing.ActiveVar(index) for index in vehicle_reload_indices])
+                )
+            else:
+                solver.Add(used_reload_count == 0)
+            executed_trips = solver.IntVar(
+                0,
+                1 + len(vehicle_reload_indices),
+                f"executed_trips_{vehicle_id}",
+            )
+            delivered_load = delivered_dimension.CumulVar(routing.End(vehicle_id))
+            trip_capacity = int(round(truck.capacity_kl * UNUSED_CAPACITY_SCALE))
+            max_unused_capacity = trip_capacity * (1 + len(vehicle_reload_indices))
+            unused_capacity = solver.IntVar(
+                0,
+                max_unused_capacity,
+                f"unused_capacity_{vehicle_id}",
+            )
+            unused_capacity_penalty_cost = solver.IntVar(
+                0,
+                math.ceil(max_unused_capacity * unused_capacity_penalty_per_kl / UNUSED_CAPACITY_SCALE),
+                f"unused_capacity_penalty_cost_{vehicle_id}",
+            )
+            solver.Add(executed_trips == active_vehicle + used_reload_count)
+            solver.Add(unused_capacity == solver.Max((executed_trips * trip_capacity) - delivered_load, 0))
+            solver.Add(
+                unused_capacity_penalty_cost
+                == ((unused_capacity * unused_capacity_penalty_per_kl) // UNUSED_CAPACITY_SCALE)
+            )
+            extra_objective_vars.append(unused_capacity_penalty_cost)
+            extra_objective_weights.append(utilization_scale)
 
     for shipment in problem.shipments:
         index = manager.NodeToIndex(shipment.node_index)

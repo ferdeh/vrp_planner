@@ -34,14 +34,39 @@ import type {
 const RouteMap = lazy(() =>
   import("../components/routes/RouteMap").then((module) => ({ default: module.RouteMap })),
 );
+const ClusterMetricsDashboard = lazy(() =>
+  import("../components/ClusterMetricsDashboard").then((module) => ({ default: module.ClusterMetricsDashboard })),
+);
 
-type DetailTab = "summary" | "analysis" | "route-graph" | "route-map" | "route-detail" | "others";
+type DetailTab = "summary" | "order-detail" | "analysis" | "route-graph" | "route-map" | "route-detail" | "others";
+type DetailOrderSortKey =
+  | "order_id"
+  | "spbu"
+  | "product"
+  | "demand"
+  | "priority"
+  | "eta_spbu"
+  | "nopol_truck"
+  | "time_window"
+  | "status";
+type DetailOrderSortDirection = "asc" | "desc";
 
 function formatDateTime(value: string) {
   return new Intl.DateTimeFormat("id-ID", {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(new Date(value));
+}
+
+function hhmmToMinutes(value: string | null | undefined) {
+  if (!value || !value.includes(":")) {
+    return Number.POSITIVE_INFINITY;
+  }
+  const [hours, minutes] = value.split(":").map(Number);
+  if (Number.isNaN(hours) || Number.isNaN(minutes)) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return hours * 60 + minutes;
 }
 
 function orderMeta(detail: ScenarioDetailResponse | undefined, orderId: string) {
@@ -65,6 +90,88 @@ function withSpbuNames(detail: ScenarioDetailResponse, text: string) {
 
 function normalizeAnalysisTexts(detail: ScenarioDetailResponse, texts: string[]) {
   return texts.map((item) => withSpbuNames(detail, item));
+}
+
+function orderServiceMeta(routes: ScenarioDetailResponse["route_details"] | undefined) {
+  const serviceMeta = new Map<string, { eta: string; noPolisi: string | null }>();
+  if (!routes?.length) {
+    return serviceMeta;
+  }
+
+  for (const route of routes) {
+    for (const stop of route.stops) {
+      if (stop.stop_kind !== "delivery") {
+        continue;
+      }
+      serviceMeta.set(stop.parent_order_id, {
+        eta: stop.eta,
+        noPolisi: route.no_polisi ?? null,
+      });
+    }
+  }
+
+  return serviceMeta;
+}
+
+function sortDetailOrders(
+  orders: ScenarioDetailResponse["input_orders"],
+  serviceMeta: Map<string, { eta: string; noPolisi: string | null }>,
+  unservedParentOrderIds: Set<string>,
+  sortKey: DetailOrderSortKey,
+  sortDirection: DetailOrderSortDirection,
+) {
+  const direction = sortDirection === "asc" ? 1 : -1;
+
+  return [...orders].sort((left, right) => {
+    const leftService = serviceMeta.get(left.order_id);
+    const rightService = serviceMeta.get(right.order_id);
+    const leftIsUnserved = unservedParentOrderIds.has(left.order_id);
+    const rightIsUnserved = unservedParentOrderIds.has(right.order_id);
+
+    let comparison = 0;
+    switch (sortKey) {
+      case "order_id":
+        comparison = left.order_id.localeCompare(right.order_id);
+        break;
+      case "spbu":
+        comparison = (left.spbu_name || left.spbu_id).localeCompare(right.spbu_name || right.spbu_id);
+        break;
+      case "product":
+        comparison = left.product_type.localeCompare(right.product_type);
+        break;
+      case "demand":
+        comparison = left.demand_kl - right.demand_kl;
+        break;
+      case "priority":
+        comparison = Number(right.priority) - Number(left.priority);
+        if (comparison === 0) {
+          comparison = hhmmToMinutes(left.eta) - hhmmToMinutes(right.eta);
+        }
+        break;
+      case "eta_spbu":
+        comparison = hhmmToMinutes(leftService?.eta) - hhmmToMinutes(rightService?.eta);
+        break;
+      case "nopol_truck":
+        comparison = (leftService?.noPolisi || "").localeCompare(rightService?.noPolisi || "");
+        break;
+      case "time_window":
+        comparison = hhmmToMinutes(left.time_window_start) - hhmmToMinutes(right.time_window_start);
+        if (comparison === 0) {
+          comparison = hhmmToMinutes(left.time_window_end) - hhmmToMinutes(right.time_window_end);
+        }
+        break;
+      case "status":
+        comparison = Number(leftIsUnserved) - Number(rightIsUnserved);
+        break;
+      default:
+        comparison = 0;
+    }
+
+    if (comparison === 0) {
+      comparison = left.order_id.localeCompare(right.order_id);
+    }
+    return comparison * direction;
+  });
 }
 
 function AnalysisResultView({
@@ -321,6 +428,7 @@ export function ScenarioDetailPage() {
   const initialTab = searchParams.get("tab");
   const [activeTab, setActiveTab] = useState<DetailTab>(
     initialTab === "analysis" ||
+      initialTab === "order-detail" ||
       initialTab === "route-graph" ||
       initialTab === "route-map" ||
       initialTab === "route-detail" ||
@@ -330,6 +438,8 @@ export function ScenarioDetailPage() {
   );
   const [analysisLevel, setAnalysisLevel] = useState<AnalysisLevel>("level_1");
   const [selectedAnalysisId, setSelectedAnalysisId] = useState(searchParams.get("analysisId") ?? "");
+  const [orderSortKey, setOrderSortKey] = useState<DetailOrderSortKey>("order_id");
+  const [orderSortDirection, setOrderSortDirection] = useState<DetailOrderSortDirection>("asc");
 
   const detailQuery = useQuery({
     queryKey: ["scenario", scenarioId],
@@ -368,7 +478,7 @@ export function ScenarioDetailPage() {
   const routeDetailsQuery = useQuery({
     queryKey: ["scenario-routes", scenarioId],
     queryFn: () => getScenarioRoutes(scenarioId),
-    enabled: Boolean(scenarioId) && detailQuery.isSuccess && isRouteTab,
+    enabled: Boolean(scenarioId) && detailQuery.isSuccess,
     retry: false,
   });
 
@@ -406,6 +516,7 @@ export function ScenarioDetailPage() {
     const queryTab = searchParams.get("tab");
     const nextTab: DetailTab =
       queryTab === "analysis" ||
+        queryTab === "order-detail" ||
         queryTab === "route-graph" ||
         queryTab === "route-map" ||
         queryTab === "route-detail" ||
@@ -458,8 +569,20 @@ export function ScenarioDetailPage() {
     ? detail.unserved_orders.reduce((sum, item) => sum + item.demand_kl, 0)
     : 0;
   const unservedParentOrderIds = new Set(detail?.unserved_orders.map((item) => item.parent_order_id) ?? []);
+  const servedOrderMeta = orderServiceMeta(routeDetails);
+  const sortedOrders = detail
+    ? sortDetailOrders(detail.input_orders, servedOrderMeta, unservedParentOrderIds, orderSortKey, orderSortDirection)
+    : [];
   const analysisJobs = analysisJobsQuery.data?.items ?? [];
   const selectedAnalysis = analysisJobs.find((item) => item.analysis_id === selectedAnalysisId);
+  const handleOrderSort = (sortKey: DetailOrderSortKey) => {
+    if (sortKey === orderSortKey) {
+      setOrderSortDirection((current) => (current === "asc" ? "desc" : "asc"));
+      return;
+    }
+    setOrderSortKey(sortKey);
+    setOrderSortDirection("asc");
+  };
   const handleRerun = () => {
     if (!detail) {
       return;
@@ -520,9 +643,10 @@ export function ScenarioDetailPage() {
                 </span>
               </div>
 
-              <div className="flex flex-wrap gap-3">
+                <div className="flex flex-wrap gap-3">
                   {[
                     { key: "summary", label: "Scenario Summary" },
+                    { key: "order-detail", label: "Order Detail" },
                     { key: "analysis", label: "Scenario Analysis" },
                     { key: "route-graph", label: "Route Grafik" },
                     { key: "route-map", label: "Route Map" },
@@ -621,6 +745,14 @@ export function ScenarioDetailPage() {
                           <span className="font-semibold text-ink">{formatCurrency(detail.cost_breakdown.late_arrival_penalty_total)}</span>
                         </div>
                         <div className="flex items-center justify-between rounded-2xl bg-white px-4 py-3">
+                          <span>Active truck idle penalty</span>
+                          <span className="font-semibold text-ink">{formatCurrency(detail.cost_breakdown.active_truck_idle_penalty_total)}</span>
+                        </div>
+                        <div className="flex items-center justify-between rounded-2xl bg-white px-4 py-3">
+                          <span>Unused opportunity capacity penalty</span>
+                          <span className="font-semibold text-ink">{formatCurrency(detail.cost_breakdown.unused_opportunity_capacity_penalty_total)}</span>
+                        </div>
+                        <div className="flex items-center justify-between rounded-2xl bg-white px-4 py-3">
                           <span>Priority ETA penalty</span>
                           <span className="font-semibold text-ink">{formatCurrency(detail.cost_breakdown.priority_eta_penalty_total)}</span>
                         </div>
@@ -648,70 +780,109 @@ export function ScenarioDetailPage() {
 
               <ScenarioFleetCharts routes={routeSummaryDetails} />
 
-              <section className="panel">
-                <div className="panel-header">
-                  <h2 className="text-xl font-semibold text-ink">List Order</h2>
-                  <p className="mt-2 text-sm text-slate-500">
-                    Daftar seluruh order pada scenario ini beserta status pelayanannya.
-                  </p>
-                </div>
-                <div className="panel-body">
-                  <div className="table-shell">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>Order ID</th>
-                          <th>SPBU</th>
-                          <th>Produk</th>
-                          <th>Demand</th>
-                          <th>Priority</th>
-                          <th>Time Window</th>
-                          <th>Status</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {detail.input_orders.map((order) => {
-                          const isUnserved = unservedParentOrderIds.has(order.order_id);
-                          return (
-                            <tr key={order.order_id}>
-                              <td className="font-semibold text-ink">{order.order_id}</td>
-                              <td>{order.spbu_name || order.spbu_id}</td>
-                              <td>{order.product_type}</td>
-                              <td>{formatNumber(order.demand_kl)} KL</td>
-                              <td>
-                                {order.priority ? (
-                                  <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-700">
-                                    Priority{order.eta ? ` · ETA ${order.eta}` : ""}
-                                  </span>
-                                ) : (
-                                  <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-500">
-                                    Normal
-                                  </span>
-                                )}
-                              </td>
-                              <td>
-                                {order.time_window_start} - {order.time_window_end}
-                              </td>
-                              <td>
-                                <span
-                                  className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                                    isUnserved
-                                      ? "bg-rose-100 text-rose-700"
-                                      : "bg-emerald-100 text-emerald-700"
-                                  }`}
-                                >
-                                  {isUnserved ? "Unserved" : "Served"}
-                                </span>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
+              <section className="space-y-6">
+                <section className="panel">
+                  <div className="panel-header">
+                    <h2 className="text-xl font-semibold text-ink">Cluster Metrics</h2>
+                    <p className="mt-2 text-sm text-slate-500">
+                      Ringkasan performa cluster RouteFinder untuk scenario ini ditampilkan langsung di summary.
+                    </p>
                   </div>
-                </div>
+                </section>
+                <Suspense fallback={<section className="panel p-6 text-sm text-slate-500">Menyiapkan cluster metrics...</section>}>
+                  <ClusterMetricsDashboard scenarioId={scenarioId} />
+                </Suspense>
               </section>
             </>
+          ) : null}
+
+          {activeTab === "order-detail" ? (
+            <section className="panel">
+              <div className="panel-header">
+                <h2 className="text-xl font-semibold text-ink">List Order</h2>
+                <p className="mt-2 text-sm text-slate-500">
+                  Daftar seluruh order pada scenario ini beserta status pelayanannya.
+                </p>
+              </div>
+              <div className="panel-body">
+                <div className="table-shell">
+                  <table>
+                    <thead>
+                      <tr>
+                        {[
+                          ["order_id", "Order ID"],
+                          ["spbu", "SPBU"],
+                          ["product", "Produk"],
+                          ["demand", "Demand"],
+                          ["priority", "Priority"],
+                          ["eta_spbu", "ETA SPBU"],
+                          ["nopol_truck", "Nopol Truck"],
+                          ["time_window", "Time Window"],
+                          ["status", "Status"],
+                        ].map(([sortKey, label]) => {
+                          const isActive = orderSortKey === sortKey;
+                          return (
+                            <th key={sortKey}>
+                              <button
+                                type="button"
+                                onClick={() => handleOrderSort(sortKey as DetailOrderSortKey)}
+                                className={`inline-flex items-center gap-2 transition ${
+                                  isActive ? "text-ink" : "text-slate-500 hover:text-ink"
+                                }`}
+                              >
+                                <span>{label}</span>
+                                <span className="text-[11px]">{isActive ? (orderSortDirection === "asc" ? "▲" : "▼") : "↕"}</span>
+                              </button>
+                            </th>
+                          );
+                        })}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sortedOrders.map((order) => {
+                        const isUnserved = unservedParentOrderIds.has(order.order_id);
+                        const serviceMeta = servedOrderMeta.get(order.order_id);
+                        return (
+                          <tr key={order.order_id}>
+                            <td className="font-semibold text-ink">{order.order_id}</td>
+                            <td>{order.spbu_name || order.spbu_id}</td>
+                            <td>{order.product_type}</td>
+                            <td>{formatNumber(order.demand_kl)} KL</td>
+                            <td>
+                              {order.priority ? (
+                                <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-700">
+                                  Priority{order.eta ? ` · ETA ${order.eta}` : ""}
+                                </span>
+                              ) : (
+                                <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-500">
+                                  Normal
+                                </span>
+                              )}
+                            </td>
+                            <td>{serviceMeta?.eta ?? "-"}</td>
+                            <td>{serviceMeta?.noPolisi ?? "-"}</td>
+                            <td>
+                              {order.time_window_start} - {order.time_window_end}
+                            </td>
+                            <td>
+                              <span
+                                className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                                  isUnserved
+                                    ? "bg-rose-100 text-rose-700"
+                                    : "bg-emerald-100 text-emerald-700"
+                                }`}
+                              >
+                                {isUnserved ? "Unserved" : "Served"}
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </section>
           ) : null}
 
           {activeTab === "analysis" ? (

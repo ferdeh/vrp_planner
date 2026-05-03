@@ -82,6 +82,7 @@ export function ScenariosPage() {
           ) : (
             <ScenariosTable
               items={scenariosQuery.data?.items ?? []}
+              enablePagination
               selectedIds={selectedScenarioIds}
               onSelectionChange={(ids) => {
                 setSelectedScenarioIds(ids);

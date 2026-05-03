@@ -1,6 +1,7 @@
 import axios from "axios";
 import type {
   AnalysisLevel,
+  ClusterMetricsResponse,
   DepotData,
   MasterEffectiveEdge,
   MasterNetworkNode,
@@ -8,6 +9,9 @@ import type {
   MasterDataListResponse,
   OptimizationRequest,
   RepositoryVersionResponse,
+  SolverJobResponse,
+  SolverSettings,
+  SolverSettingsResponse,
   ScenarioAnalysisCreateRequest,
   ScenarioAnalysisDetailResponse,
   ScenarioAnalysisJobResponse,
@@ -55,6 +59,21 @@ export async function optimize(payload: OptimizationRequest) {
   return data;
 }
 
+export async function getSolverSettings() {
+  const { data } = await api.get<SolverSettingsResponse>("/api/vrp/solver-settings");
+  return data;
+}
+
+export async function updateSolverSettings(payload: SolverSettings) {
+  const { data } = await api.put<SolverSettingsResponse>("/api/vrp/solver-settings", payload);
+  return data;
+}
+
+export async function solveVrp(payload: OptimizationRequest) {
+  const { data } = await api.post<SolverJobResponse>("/api/vrp/solve", payload);
+  return data;
+}
+
 export async function listScenarios() {
   const { data } = await api.get<ScenarioQueryResponse>("/api/v1/scenarios");
   return data;
@@ -76,6 +95,13 @@ export async function getScenario(scenarioId: string) {
 
 export async function getScenarioRoutes(scenarioId: string) {
   const { data } = await api.get<ScenarioDetailResponse["route_details"]>(`/api/v1/scenarios/${scenarioId}/routes`);
+  return data;
+}
+
+export async function getClusterMetrics(scenarioId: string) {
+  const { data } = await api.get<ClusterMetricsResponse>("/api/vrp/cluster-metrics", {
+    params: { scenario_id: scenarioId },
+  });
   return data;
 }
 

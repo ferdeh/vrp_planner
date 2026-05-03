@@ -1,6 +1,8 @@
 # Solver Pipeline
 
-Dokumen ini merangkum perilaku solver terbaru pada planner backend. Fokus utamanya adalah memastikan coverage order didahulukan sebelum optimasi objective biaya, jarak, dan waktu.
+Dokumen ini merangkum perilaku solver terbaru pada planner backend. Fokus utamanya adalah memastikan coverage order didahulukan sebelum optimasi objective biaya, jarak, dan waktu, sambil menjelaskan di mana RouteFinder clustering masuk ke pipeline.
+
+Untuk dokumentasi detail yang membahas rumus objective, penalty, multi-trip reload, dan mode objective terbaru, lihat [solver.md](/Users/ferdiansyahzulkarnain/Documents/my Dev/vrp_planner/solver.md).
 
 ## Prinsip utama
 
@@ -8,6 +10,25 @@ Dokumen ini merangkum perilaku solver terbaru pada planner backend. Fokus utaman
 - `Allow unserved` bukan lagi objective, tetapi hanya izin untuk fallback ke partial solution
 - partial solution tidak dicari dari nol bila sudah ada seed yang baik; solver mencoba repair dari solusi yang sudah ditemukan
 - multi-trip dilakukan melalui reload depot yang dibentuk per grup truck agar reset kapasitas dan compartment sesuai tipe truck
+- bila `use_routefinder = true`, RouteFinder hanya menyusun cluster SPBU; OR-Tools tetap menyusun route final
+- cluster RouteFinder memengaruhi objective lewat `soft_cluster_penalty` atau `hard_cluster_penalty` pada arc `shipment -> shipment`
+
+## Peran RouteFinder clustering
+
+Saat hybrid mode aktif:
+
+1. backend membangun canonical VRP payload
+2. RouteFinder dipanggil melalui `POST /routefinder/generate-clusters`
+3. hasil cluster ditempel ke canonical model dan `PreprocessedProblem`
+4. OR-Tools menjalankan pipeline solve biasa
+5. arc lintas cluster diberi cross-cluster penalty sesuai `cluster_mode`
+
+Catatan penting:
+
+- `cluster_mode = soft` memakai default penalty `50.000`
+- `cluster_mode = hard` memakai default penalty `5.000.000`
+- mode `hard` tetap bukan hard constraint absolut; solver masih boleh menyeberang cluster bila objective total lebih murah
+- perpindahan lewat `depot` atau `reload` tidak dikenai cluster penalty karena penalty hanya aktif pada `shipment -> shipment`
 
 ## Tahapan solve
 

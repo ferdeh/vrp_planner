@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { defaultOptimizationConfig } from "../../lib/sampleData";
 
 const hardItems = [
   { path: "capacity_limit", label: "Capacity limit", description: "Kapasitas truck wajib dipenuhi." },
@@ -575,9 +576,63 @@ export function OptimizationConfigPanel({
         </div>
       </div>
 
-      <div className={`grid gap-4 md:grid-cols-2 ${showCostControls ? "lg:grid-cols-5" : "lg:grid-cols-3"}`}>
+      <div className={`grid gap-4 md:grid-cols-2 ${showCostControls ? "lg:grid-cols-6" : "lg:grid-cols-3"}`}>
         {showCostControls ? (
           <>
+            <label className="field">
+              <span>Idle threshold truck count (%)</span>
+              <input
+                type="number"
+                min="0"
+                max="100"
+                className="input"
+                {...register(`${prefix}.penalties.active_truck_idle_threshold_percent_truck_count`, { valueAsNumber: true })}
+              />
+            </label>
+            <label className="field">
+              <span>Idle threshold depot (%)</span>
+              <input
+                type="number"
+                min="0"
+                max="100"
+                className="input"
+                {...register(`${prefix}.penalties.active_truck_idle_threshold_percent_depot_operation`, { valueAsNumber: true })}
+              />
+            </label>
+            <label className="field">
+              <span>Soft cross-cluster penalty</span>
+              <input
+                type="number"
+                min="0"
+                className="input"
+                {...register(`${prefix}.penalties.soft_cluster_penalty`, { valueAsNumber: true })}
+              />
+            </label>
+            <label className="field">
+              <span>Hard cross-cluster penalty</span>
+              <input
+                type="number"
+                min="0"
+                className="input"
+                {...register(`${prefix}.penalties.hard_cluster_penalty`, { valueAsNumber: true })}
+              />
+            </label>
+            <label className="field">
+              <span>Active truck idle penalty / minute</span>
+              <input
+                type="number"
+                className="input"
+                {...register(`${prefix}.penalties.active_truck_idle_penalty_per_minute`, { valueAsNumber: true })}
+              />
+            </label>
+            <label className="field">
+              <span>Unused opportunity capacity penalty / KL</span>
+              <input
+                type="number"
+                className="input"
+                {...register(`${prefix}.penalties.unused_opportunity_capacity_penalty_per_kl`, { valueAsNumber: true })}
+              />
+            </label>
             <label className="field">
               <span>Vehicle activation weight</span>
               <input type="number" className="input" {...register(`${prefix}.penalties.activation_cost_vehicle`, { valueAsNumber: true })} />
@@ -598,6 +653,19 @@ export function OptimizationConfigPanel({
                 {...register(`${prefix}.penalties.depot_operation_time_weight`, { valueAsNumber: true })}
               />
             </label>
+            <div className="field justify-end md:col-span-2 lg:col-span-6">
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => {
+                  Object.entries(defaultOptimizationConfig.penalties).forEach(([key, value]) => {
+                    setValue(`${prefix}.penalties.${key}`, value, { shouldDirty: true });
+                  });
+                }}
+              >
+                Reset parameter solver ke default
+              </button>
+            </div>
           </>
         ) : null}
         <label className="field">

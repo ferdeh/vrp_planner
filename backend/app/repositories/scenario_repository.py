@@ -22,7 +22,7 @@ class ScenarioRepository:
             dispatch_date=payload.dispatch_date,
             depot_id=payload.depot_id,
             status="processing",
-            message="Optimization is in progress.",
+            message="Waiting for solver worker.",
             raw_request=payload.model_dump(mode="json"),
             orders=[
                 db_models.ScenarioOrder(**order.model_dump(exclude={"spbu_name"}))
@@ -73,6 +73,14 @@ class ScenarioRepository:
         self.db.refresh(scenario)
         return scenario
 
+    def update_progress(self, scenario: db_models.Scenario, message: str) -> db_models.Scenario:
+        scenario.status = "processing"
+        scenario.message = message
+        self.db.add(scenario)
+        self.db.commit()
+        self.db.refresh(scenario)
+        return scenario
+
     def get_scenario(self, scenario_id: UUID | str) -> db_models.Scenario | None:
         stmt = (
             select(db_models.Scenario)
@@ -89,6 +97,33 @@ class ScenarioRepository:
         )
         return self.db.execute(stmt).unique().scalar_one_or_none()
 
+    def list_related_scenarios(
+        self,
+        *,
+        dispatch_date,
+        depot_id: str,
+        limit: int = 8,
+    ) -> list[db_models.Scenario]:
+        stmt = (
+            select(db_models.Scenario)
+            .where(
+                db_models.Scenario.dispatch_date == dispatch_date,
+                db_models.Scenario.depot_id == depot_id,
+            )
+            .options(
+                selectinload(db_models.Scenario.orders),
+                selectinload(db_models.Scenario.trucks),
+                joinedload(db_models.Scenario.optimization_config),
+                joinedload(db_models.Scenario.result)
+                .selectinload(db_models.OptimizationResult.routes)
+                .selectinload(db_models.OptimizationRoute.stops),
+                joinedload(db_models.Scenario.result).selectinload(db_models.OptimizationResult.unserved_orders),
+            )
+            .order_by(desc(db_models.Scenario.created_at))
+            .limit(limit)
+        )
+        return self.db.execute(stmt).unique().scalars().all()
+
     def list_scenarios(self) -> schemas.ScenarioQueryResponse:
         stmt = (
             select(db_models.Scenario)
@@ -102,6 +137,7 @@ class ScenarioRepository:
                 dispatch_date=row.dispatch_date,
                 depot_id=row.depot_id,
                 status=row.result.status if row.result else row.status,
+                status_message=row.result.message if row.result else row.message,
                 total_demand=row.result.total_demand if row.result else 0,
                 total_delivered_demand=row.result.total_delivered_demand if row.result else 0,
                 active_truck_count=row.result.active_truck_count if row.result else 0,

@@ -99,6 +99,19 @@ class Settings(BaseModel):
     request_timeout_seconds: float = Field(
         default_factory=lambda: float(os.getenv("EXTERNAL_API_TIMEOUT_SECONDS", "10"))
     )
+    solver_backbone: str = Field(default_factory=lambda: os.getenv("SOLVER_BACKBONE", "ortools"))
+    routefinder_service_url: str = Field(
+        default_factory=lambda: os.getenv("ROUTEFINDER_SERVICE_URL", "http://vrp-routefinder-service:8090")
+    )
+    routefinder_default_enabled: bool = Field(
+        default_factory=lambda: _get_bool("ROUTEFINDER_DEFAULT_ENABLED", False)
+    )
+    routefinder_default_cluster_mode: str = Field(
+        default_factory=lambda: os.getenv("ROUTEFINDER_CLUSTER_MODE", os.getenv("ROUTEFINDER_DEFAULT_MODE", "soft"))
+    )
+    routefinder_default_max_cluster_size: int = Field(
+        default_factory=lambda: int(os.getenv("ROUTEFINDER_MAX_CLUSTER_SIZE", "5"))
+    )
 
     @property
     def is_dev(self) -> bool:
