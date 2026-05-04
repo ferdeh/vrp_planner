@@ -175,17 +175,9 @@ class PreprocessingService:
         matrix_positions: dict[str, int],
         starting_node_index: int,
     ) -> list[RouteNode]:
-        remaining_deficit = max(0.0, self._total_order_demand(payload.orders) - sum(truck.capacity_kl for truck in available_trucks))
-        if remaining_deficit <= 0:
-            return []
-
         reload_nodes: list[RouteNode] = []
         next_node_index = starting_node_index
-        vehicle_trip_limits: list[tuple[int, schemas.TruckInput, int]] = []
-        for vehicle_index, truck in sorted(
-            enumerate(available_trucks),
-            key=lambda item: (item[1].capacity_kl, item[0]),
-        ):
+        for vehicle_index, truck in enumerate(available_trucks):
             compatible_shipments = self._vehicle_compatible_shipments(shipments, vehicle_index)
             max_trip_count = self._estimate_vehicle_max_trip_count(
                 payload,
@@ -195,16 +187,9 @@ class PreprocessingService:
                 time_matrix,
                 matrix_positions,
             )
-            if compatible_shipments and max_trip_count > 1:
-                vehicle_trip_limits.append((vehicle_index, truck, max_trip_count))
-
-        next_trip_number_by_vehicle = {vehicle_index: 2 for vehicle_index, _truck, _max_trip_count in vehicle_trip_limits}
-        while remaining_deficit > 0:
-            progressed = False
-            for vehicle_index, truck, max_trip_count in vehicle_trip_limits:
-                trip_number = next_trip_number_by_vehicle[vehicle_index]
-                if trip_number > max_trip_count or remaining_deficit <= 0:
-                    continue
+            if not compatible_shipments:
+                continue
+            for trip_number in range(2, max_trip_count + 1):
                 next_node_index += 1
                 reload_nodes.append(
                     RouteNode(
@@ -226,18 +211,7 @@ class PreprocessingService:
                         reload_trip_number=trip_number,
                     )
                 )
-                next_trip_number_by_vehicle[vehicle_index] += 1
-                remaining_deficit = max(0.0, remaining_deficit - truck.capacity_kl)
-                progressed = True
-                if remaining_deficit <= 0:
-                    break
-            if not progressed:
-                break
         return reload_nodes
-
-    @staticmethod
-    def _total_order_demand(orders: list[schemas.OrderInput]) -> float:
-        return round(sum(order.demand_kl for order in orders), 6)
 
     def preprocess(
         self,
