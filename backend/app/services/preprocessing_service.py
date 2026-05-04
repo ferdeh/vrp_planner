@@ -175,8 +175,7 @@ class PreprocessingService:
         matrix_positions: dict[str, int],
         starting_node_index: int,
     ) -> list[RouteNode]:
-        reload_nodes: list[RouteNode] = []
-        next_node_index = starting_node_index
+        vehicle_trip_limits: list[tuple[int, schemas.TruckInput, int]] = []
         for vehicle_index, truck in enumerate(available_trucks):
             compatible_shipments = self._vehicle_compatible_shipments(shipments, vehicle_index)
             max_trip_count = self._estimate_vehicle_max_trip_count(
@@ -187,31 +186,121 @@ class PreprocessingService:
                 time_matrix,
                 matrix_positions,
             )
-            if not compatible_shipments:
-                continue
+            if compatible_shipments and max_trip_count > 1:
+                vehicle_trip_limits.append((vehicle_index, truck, max_trip_count))
+
+        if not vehicle_trip_limits:
+            return []
+
+        total_demand = self._total_order_demand(payload.orders)
+        initial_capacity = round(sum(truck.capacity_kl for truck in available_trucks), 6)
+        remaining_deficit = max(0.0, total_demand - initial_capacity)
+        if remaining_deficit > 0 and self._should_cap_reload_nodes(payload, config):
+            return self._build_deficit_capped_reload_nodes(
+                payload,
+                vehicle_trip_limits,
+                starting_node_index=starting_node_index,
+                remaining_deficit=remaining_deficit,
+            )
+
+        reload_nodes: list[RouteNode] = []
+        next_node_index = starting_node_index
+        for vehicle_index, truck, max_trip_count in vehicle_trip_limits:
             for trip_number in range(2, max_trip_count + 1):
                 next_node_index += 1
                 reload_nodes.append(
-                    RouteNode(
+                    self._build_reload_node(
+                        payload,
+                        truck,
+                        vehicle_index=vehicle_index,
+                        trip_number=trip_number,
                         node_index=next_node_index,
-                        node_kind="reload",
-                        order_id=f"DEPOT_RELOAD#{truck.truck_id}#{trip_number}",
-                        parent_order_id="-",
-                        spbu_id=payload.depot_id,
-                        product_type="DEPOT_RELOAD",
-                        demand_kl=0.0,
-                        service_time_minutes=payload.depot_service_time_minutes,
-                        time_window_start=0,
-                        time_window_end=24 * 60 * 2,
-                        allowed_vehicle_indices=[vehicle_index],
-                        matrix_node_name="DEPOT",
-                        reload_capacity_kl=truck.capacity_kl,
-                        reload_compartment_count=max(1, len(truck.compartments)),
-                        reload_vehicle_index=vehicle_index,
-                        reload_trip_number=trip_number,
                     )
                 )
         return reload_nodes
+
+    def _build_deficit_capped_reload_nodes(
+        self,
+        payload: schemas.OptimizationRequest,
+        vehicle_trip_limits: list[tuple[int, schemas.TruckInput, int]],
+        *,
+        starting_node_index: int,
+        remaining_deficit: float,
+    ) -> list[RouteNode]:
+        reload_nodes: list[RouteNode] = []
+        next_node_index = starting_node_index
+        prioritized_trip_limits = sorted(vehicle_trip_limits, key=lambda item: (item[1].capacity_kl, item[0]))
+        next_trip_number_by_vehicle = {
+            vehicle_index: 2 for vehicle_index, _truck, _max_trip_count in prioritized_trip_limits
+        }
+        while remaining_deficit > 0:
+            progressed = False
+            for vehicle_index, truck, max_trip_count in prioritized_trip_limits:
+                trip_number = next_trip_number_by_vehicle[vehicle_index]
+                if trip_number > max_trip_count or remaining_deficit <= 0:
+                    continue
+                next_node_index += 1
+                reload_nodes.append(
+                    self._build_reload_node(
+                        payload,
+                        truck,
+                        vehicle_index=vehicle_index,
+                        trip_number=trip_number,
+                        node_index=next_node_index,
+                    )
+                )
+                next_trip_number_by_vehicle[vehicle_index] += 1
+                remaining_deficit = max(0.0, remaining_deficit - truck.capacity_kl)
+                progressed = True
+                if remaining_deficit <= 0:
+                    break
+            if not progressed:
+                break
+        return reload_nodes
+
+    @staticmethod
+    def _build_reload_node(
+        payload: schemas.OptimizationRequest,
+        truck: schemas.TruckInput,
+        *,
+        vehicle_index: int,
+        trip_number: int,
+        node_index: int,
+    ) -> RouteNode:
+        return RouteNode(
+            node_index=node_index,
+            node_kind="reload",
+            order_id=f"DEPOT_RELOAD#{truck.truck_id}#{trip_number}",
+            parent_order_id="-",
+            spbu_id=payload.depot_id,
+            product_type="DEPOT_RELOAD",
+            demand_kl=0.0,
+            service_time_minutes=payload.depot_service_time_minutes,
+            time_window_start=0,
+            time_window_end=24 * 60 * 2,
+            allowed_vehicle_indices=[vehicle_index],
+            matrix_node_name="DEPOT",
+            reload_capacity_kl=truck.capacity_kl,
+            reload_compartment_count=max(1, len(truck.compartments)),
+            reload_vehicle_index=vehicle_index,
+            reload_trip_number=trip_number,
+        )
+
+    @staticmethod
+    def _total_order_demand(orders: list[schemas.OrderInput]) -> float:
+        return round(sum(order.demand_kl for order in orders), 6)
+
+    @staticmethod
+    def _should_cap_reload_nodes(
+        payload: schemas.OptimizationRequest,
+        config: schemas.OptimizationConfig,
+    ) -> bool:
+        solver_settings = payload.solver_settings
+        return bool(
+            solver_settings
+            and solver_settings.use_routefinder
+            and config.primary_objective == schemas.PrimaryObjective.MINIMIZE_DEPOT_OPERATION
+        )
 
     def preprocess(
         self,

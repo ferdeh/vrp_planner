@@ -61,6 +61,18 @@ class OrToolsSolver:
     """Solve the prepared routing problem using OR-Tools."""
 
     @staticmethod
+    def _best_effort_message_prefix(
+        best_effort_prefix: str | None,
+        *,
+        best_unserved: int,
+    ) -> str:
+        if not best_effort_prefix:
+            return ""
+        if best_unserved == 0:
+            return best_effort_prefix.replace("best-effort partial solution", "best-effort repaired solution")
+        return best_effort_prefix
+
+    @staticmethod
     def _is_heavy_multi_trip_problem(problem: PreprocessedProblem) -> bool:
         if not problem.reload_nodes:
             return False
@@ -1111,7 +1123,11 @@ class OrToolsSolver:
                     cost_refined = True
 
         runtime = time.perf_counter() - started
-        message_prefix = f"{best_effort_prefix} " if best_effort_prefix else ""
+        normalized_prefix = self._best_effort_message_prefix(
+            best_effort_prefix,
+            best_unserved=best_unserved,
+        )
+        message_prefix = f"{normalized_prefix} " if normalized_prefix else ""
         if best_unserved == 0:
             if forced_cleanup_refined:
                 message = (

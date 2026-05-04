@@ -620,6 +620,23 @@ def test_result_status_becomes_timeout_when_solver_times_out(configured_modules,
     assert result.total_unserved_orders == len(payload.orders)
 
 
+def test_best_effort_prefix_drops_partial_wording_for_full_service_result():
+    assert (
+        OrToolsSolver._best_effort_message_prefix(
+            "Strict full-service solve failed; returning best-effort partial solution.",
+            best_unserved=0,
+        )
+        == "Strict full-service solve failed; returning best-effort repaired solution."
+    )
+    assert (
+        OrToolsSolver._best_effort_message_prefix(
+            "Strict full-service solve failed; returning best-effort partial solution.",
+            best_unserved=2,
+        )
+        == "Strict full-service solve failed; returning best-effort partial solution."
+    )
+
+
 def test_solver_adds_depot_service_time_per_truck(configured_modules, sample_payload):
     base_payload = schemas.OptimizationRequest.model_validate(sample_payload)
     base_payload.orders = [base_payload.orders[0].model_copy(update={"demand_kl": 8})]
@@ -710,7 +727,10 @@ def test_objective_priority_scales_follow_user_order(sample_payload):
     assert effective_unserved_penalty(config) == int(config.penalties.unserved_order_penalty)
 
 
-def test_preprocessing_limits_reload_nodes_to_capacity_deficit(configured_modules, sample_payload):
+def test_preprocessing_limits_reload_nodes_to_capacity_deficit_for_routefinder_depot_mode(
+    configured_modules,
+    sample_payload,
+):
     payload = schemas.OptimizationRequest.model_validate(sample_payload)
     payload.orders.append(
         schemas.OrderInput(
@@ -724,6 +744,14 @@ def test_preprocessing_limits_reload_nodes_to_capacity_deficit(configured_module
             time_window_start="08:00",
             time_window_end="15:00",
         )
+    )
+    payload.solver_settings = schemas.SolverSettings(use_routefinder=True)
+    payload.optimization_config = payload.optimization_config.model_copy(
+        update={
+            "primary_objective": schemas.PrimaryObjective.MINIMIZE_DEPOT_OPERATION,
+            "minimize_truck_count": False,
+            "minimize_depot_operation_time": True,
+        }
     )
 
     problem = PreprocessingService().preprocess(payload, payload.optimization_config)
@@ -797,7 +825,7 @@ def test_solver_uses_insertion_seed_when_multi_trip_reload_nodes_exist(configure
 
     problem = PreprocessingService().preprocess(payload, payload.optimization_config)
 
-    assert len(problem.reload_nodes) == 1
+    assert len(problem.reload_nodes) > 0
     assert problem.config.solver_options.first_solution_strategy == "PATH_CHEAPEST_ARC"
     assert (
         OrToolsSolver._resolve_first_solution_strategy(problem)
