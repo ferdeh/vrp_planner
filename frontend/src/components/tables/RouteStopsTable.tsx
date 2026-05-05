@@ -1,3 +1,4 @@
+import { formatNumber } from "../../lib/format";
 import type { RouteDetailResponse } from "../../types/api";
 
 export function RouteStopsTable({
@@ -5,14 +6,15 @@ export function RouteStopsTable({
 }: {
   route: RouteDetailResponse;
 }) {
+  const formatDistanceKm = (value: number | null | undefined) => (value === null || value === undefined ? "-" : formatNumber(value));
+
   const displayRows: Array<{
     key: string;
     sequence: number;
     tripSequence: number;
     originName: string;
     originEtd: string;
-    path: string;
-    maxVelocity: string;
+    totalKm: string;
     driveMinutes: number | string;
     orderId: string;
     parentOrderId: string;
@@ -29,8 +31,7 @@ export function RouteStopsTable({
       tripSequence: stop.trip_sequence,
       originName: previousStop?.spbu_name || route.origin_name || "-",
       originEtd: previousStop?.etd || route.origin_etd || "-",
-      path: stop.travel_path || "-",
-      maxVelocity: stop.segment_max_velocity_kmh || "-",
+      totalKm: formatDistanceKm(stop.travel_distance_km),
       driveMinutes: stop.travel_time_minutes ?? "-",
       orderId:
         stop.stop_kind === "depot_reload"
@@ -55,8 +56,7 @@ export function RouteStopsTable({
       tripSequence: route.trip_count,
       originName: lastStop.spbu_name || "-",
       originEtd: lastStop.etd,
-      path: route.return_path || "-",
-      maxVelocity: route.return_segment_max_velocity_kmh || "-",
+      totalKm: formatDistanceKm(route.return_distance_km),
       driveMinutes: route.return_travel_time_minutes ?? "-",
       orderId: "-",
       parentOrderId: "-",
@@ -77,8 +77,7 @@ export function RouteStopsTable({
             <th>Trip</th>
             <th>Origin</th>
             <th>ETD Origin</th>
-            <th>Path</th>
-            <th>Max Velocity</th>
+            <th>Total KM</th>
             <th>Drive Min</th>
             <th>Order</th>
             <th>Parent</th>
@@ -96,8 +95,7 @@ export function RouteStopsTable({
               <td>{row.tripSequence}</td>
               <td>{row.originName}</td>
               <td>{row.originEtd}</td>
-              <td>{row.path}</td>
-              <td>{row.maxVelocity}</td>
+              <td>{row.totalKm}</td>
               <td>{row.driveMinutes}</td>
               <td>{row.orderId}</td>
               <td>{row.parentOrderId}</td>
