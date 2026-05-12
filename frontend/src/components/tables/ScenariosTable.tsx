@@ -104,6 +104,7 @@ export function ScenariosTable({
                   aria-label="Select all scenarios"
                 />
               </th>
+              <th>Scenario ID</th>
               <th>Tanggal</th>
               <th>Depot</th>
               <th>Status</th>
@@ -128,6 +129,7 @@ export function ScenariosTable({
                     aria-label={`Select scenario ${item.scenario_id}`}
                   />
                 </td>
+                <td className="max-w-[220px] break-all font-mono text-xs leading-5">{item.scenario_id}</td>
                 <td>{item.dispatch_date}</td>
                 <td>{item.depot_id}</td>
                 <td>

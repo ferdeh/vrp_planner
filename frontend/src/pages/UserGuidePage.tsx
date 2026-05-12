@@ -1,6 +1,8 @@
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import { AppLayout } from "../components/layout/AppLayout";
 import { PageHeader } from "../components/layout/PageHeader";
+import { downloadSolverGuidePdf } from "../services/api";
 
 const quickSteps = [
   {
@@ -321,17 +323,76 @@ function GuideSection({
 }
 
 export function UserGuidePage() {
+  const [isDownloadingGuide, setIsDownloadingGuide] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+
+  async function handleDownloadSolverGuide() {
+    setIsDownloadingGuide(true);
+    setDownloadError(null);
+
+    try {
+      const pdfBlob = await downloadSolverGuidePdf();
+      const objectUrl = window.URL.createObjectURL(pdfBlob);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = "vrp-planner-solver-guide.pdf";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(objectUrl);
+    } catch (error) {
+      console.error("Failed to download solver guide PDF", error);
+      setDownloadError("PDF solver guide belum bisa diunduh. Coba ulang beberapa saat lagi.");
+    } finally {
+      setIsDownloadingGuide(false);
+    }
+  }
+
   return (
     <AppLayout>
       <PageHeader
         title="Panduan User"
         description="Petunjuk penggunaan VRP Planner untuk operator dispatch, planner, dan analyst operasional."
         action={
-          <Link className="btn-primary" to="/new-optimization">
-            Buka Form Optimisasi
-          </Link>
+          <>
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={handleDownloadSolverGuide}
+              disabled={isDownloadingGuide}
+            >
+              {isDownloadingGuide ? "Membuat PDF Solver Guide..." : "Download Solver Guide"}
+            </button>
+            <Link className="btn-primary" to="/new-optimization">
+              Buka Form Optimisasi
+            </Link>
+          </>
         }
       />
+
+      <section className="panel overflow-hidden">
+        <div className="panel-body flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.32em] text-petroblue">Reference PDF</p>
+            <h2 className="mt-3 text-2xl font-semibold text-ink">Download solver guide teknis</h2>
+            <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-600">
+              Tombol download akan mengambil isi terbaru dari <code>solver.md</code>, mengubahnya ke PDF,
+              lalu menambahkan footer Neuron di setiap halaman.
+            </p>
+          </div>
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={handleDownloadSolverGuide}
+            disabled={isDownloadingGuide}
+          >
+            {isDownloadingGuide ? "Membuat PDF..." : "Unduh PDF"}
+          </button>
+        </div>
+        {downloadError ? (
+          <div className="border-t border-rose-100 bg-rose-50/80 px-6 py-4 text-sm text-rose-700">{downloadError}</div>
+        ) : null}
+      </section>
 
       <GuideSection
         eyebrow="Quick Start"

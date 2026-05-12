@@ -174,6 +174,20 @@ function sortDetailOrders(
   });
 }
 
+function downloadJson(filename: string, payload: unknown) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], {
+    type: "application/json",
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
 function AnalysisResultView({
   detail,
   analysis,
@@ -612,6 +626,35 @@ export function ScenarioDetailPage() {
     });
   };
 
+  const handleDownloadOrders = () => {
+    if (!detail) {
+      return;
+    }
+
+    const exportPayload = {
+      type: "vrp-planner-order-import",
+      version: 1,
+      scenario_id: detail.scenario_id,
+      dispatch_date: detail.dispatch_date,
+      depot_id: detail.depot_id,
+      exported_at: new Date().toISOString(),
+      orders: detail.input_orders.map((order) => ({
+        order_id: order.order_id,
+        spbu_id: order.spbu_id,
+        spbu_name: order.spbu_name ?? null,
+        product_type: order.product_type,
+        demand_kl: order.demand_kl,
+        priority: order.priority,
+        eta: order.eta ?? "",
+        service_time_minutes: order.service_time_minutes,
+        time_window_start: order.time_window_start,
+        time_window_end: order.time_window_end,
+      })),
+    };
+
+    downloadJson(`orders-${detail.dispatch_date}-${detail.scenario_id.slice(0, 8)}.json`, exportPayload);
+  };
+
   return (
     <AppLayout>
       <PageHeader
@@ -798,11 +841,16 @@ export function ScenarioDetailPage() {
 
           {activeTab === "order-detail" ? (
             <section className="panel">
-              <div className="panel-header">
-                <h2 className="text-xl font-semibold text-ink">List Order</h2>
-                <p className="mt-2 text-sm text-slate-500">
-                  Daftar seluruh order pada scenario ini beserta status pelayanannya.
-                </p>
+              <div className="panel-header flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <h2 className="text-xl font-semibold text-ink">List Order</h2>
+                  <p className="mt-2 text-sm text-slate-500">
+                    Daftar seluruh order pada scenario ini beserta status pelayanannya.
+                  </p>
+                </div>
+                <button type="button" className="btn-secondary" onClick={handleDownloadOrders}>
+                  Download Order
+                </button>
               </div>
               <div className="panel-body">
                 <div className="table-shell">

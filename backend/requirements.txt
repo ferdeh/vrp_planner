@@ -8,4 +8,4 @@ ortools==9.14.6206
 psycopg2-binary==2.9.10
 pytest==8.4.2
 pytest-cov==6.2.1
-
+reportlab==4.5.0

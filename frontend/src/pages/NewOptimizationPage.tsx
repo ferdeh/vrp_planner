@@ -14,7 +14,7 @@ import { OptimizationConfigPanel } from "../components/forms/OptimizationConfigP
 import { useDepotOptions, useSpbuOptions } from "../hooks/useMasterData";
 import { defaultOptimizationConfig } from "../lib/sampleData";
 import { getSettings, getSolverSettings, listAvailableTrucks, solveVrp } from "../services/api";
-import type { DepotData, OptimizationRequest, SolverSettings, SpbuData, TruckMasterData } from "../types/api";
+import type { DepotData, OptimizationRequest, OrderInput, SolverSettings, SpbuData, TruckMasterData } from "../types/api";
 
 const SAMPLE_ORDER_VOLUME_KL = 8;
 
@@ -106,6 +106,84 @@ type RerunLocationState = {
   rerunPayload?: OptimizationRequest;
 } | null;
 
+type OrderImportResult = {
+  dispatchDate?: string;
+  depotId?: string;
+  orders: OrderInput[];
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function readStringField(record: Record<string, unknown>, key: string, fallback = "") {
+  const value = record[key];
+  return value === null || value === undefined ? fallback : String(value);
+}
+
+function readNumberField(record: Record<string, unknown>, key: string, fallback: number) {
+  const value = Number(record[key]);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function readBooleanField(record: Record<string, unknown>, key: string) {
+  const value = record[key];
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    return value.toLowerCase() === "true" || value === "1";
+  }
+  return Boolean(value);
+}
+
+function parseOrderImportPayload(payload: unknown): OrderImportResult {
+  const sourceOrders = Array.isArray(payload)
+    ? payload
+    : isRecord(payload) && Array.isArray(payload.orders)
+      ? payload.orders
+      : null;
+
+  if (!sourceOrders?.length) {
+    throw new Error("File import tidak berisi data orders.");
+  }
+
+  const orders = sourceOrders.map((item, index) => {
+    if (!isRecord(item)) {
+      throw new Error(`Order baris ${index + 1} tidak valid.`);
+    }
+
+    const orderId = readStringField(item, "order_id");
+    const spbuId = readStringField(item, "spbu_id");
+    const productType = readStringField(item, "product_type");
+    const demandKl = readNumberField(item, "demand_kl", Number.NaN);
+
+    if (!orderId || !spbuId || !productType || !Number.isFinite(demandKl) || demandKl <= 0) {
+      throw new Error(`Order baris ${index + 1} wajib memiliki order_id, spbu_id, product_type, dan demand_kl.`);
+    }
+
+    const priority = readBooleanField(item, "priority");
+
+    return {
+      order_id: orderId,
+      spbu_id: spbuId,
+      product_type: productType,
+      demand_kl: demandKl,
+      priority,
+      eta: priority ? readStringField(item, "eta") : "",
+      service_time_minutes: readNumberField(item, "service_time_minutes", 30),
+      time_window_start: readStringField(item, "time_window_start", "08:00"),
+      time_window_end: readStringField(item, "time_window_end", "17:00"),
+    };
+  });
+
+  return {
+    dispatchDate: isRecord(payload) ? readStringField(payload, "dispatch_date") || undefined : undefined,
+    depotId: isRecord(payload) ? readStringField(payload, "depot_id") || undefined : undefined,
+    orders,
+  };
+}
+
 const schema = z.object({
   dispatch_date: z.string().min(1),
   depot_id: z.string().min(1),
@@ -191,6 +269,7 @@ export function NewOptimizationPage() {
   const headerSectionRef = useRef<HTMLElement | null>(null);
   const ordersSectionRef = useRef<HTMLElement | null>(null);
   const trucksSectionRef = useRef<HTMLElement | null>(null);
+  const orderImportInputRef = useRef<HTMLInputElement | null>(null);
   const appliedRerunRef = useRef<string | null>(null);
   const [truckSyncMessage, setTruckSyncMessage] = useState<InlineMessage | null>(null);
   const [orderSampleMessage, setOrderSampleMessage] = useState<InlineMessage | null>(null);
@@ -397,6 +476,54 @@ export function NewOptimizationPage() {
     setTruckSyncMessage(null);
     setSampleDotError(null);
     setIsSampleModalOpen(false);
+  };
+
+  const openOrderImport = () => {
+    orderImportInputRef.current?.click();
+  };
+
+  const handleOrderImportFile = async (file: File | undefined) => {
+    if (!file) {
+      return;
+    }
+
+    try {
+      const parsed = JSON.parse(await file.text()) as unknown;
+      const importResult = parseOrderImportPayload(parsed);
+
+      if (importResult.dispatchDate) {
+        form.setValue("dispatch_date", importResult.dispatchDate, {
+          shouldDirty: true,
+          shouldValidate: true,
+        });
+      }
+      if (importResult.depotId) {
+        form.setValue("depot_id", importResult.depotId, {
+          shouldDirty: true,
+          shouldValidate: true,
+        });
+      }
+
+      form.setValue("orders", importResult.orders, {
+        shouldDirty: true,
+        shouldValidate: true,
+      });
+      clearErrors(["dispatch_date", "depot_id", "orders"]);
+      setOrderSampleMessage({
+        text: `${importResult.orders.length} order berhasil diimport dari ${file.name}.`,
+        tone: "info",
+      });
+      setTruckSyncMessage(null);
+    } catch (error) {
+      setOrderSampleMessage({
+        text: error instanceof Error ? error.message : "Import order gagal. Pastikan file JSON berasal dari Download Order.",
+        tone: "error",
+      });
+    } finally {
+      if (orderImportInputRef.current) {
+        orderImportInputRef.current.value = "";
+      }
+    }
   };
 
   const submitOptimization = (values: OptimizationRequest) => {
@@ -689,10 +816,20 @@ export function NewOptimizationPage() {
               setValue={form.setValue}
               spbuOptions={spbuItems}
               depotSelected={Boolean(depotId)}
+              onLoadImport={openOrderImport}
               onLoadSample={openSampleModal}
               sampleMessage={orderSampleMessage?.text ?? null}
               sampleMessageTone={orderSampleMessage?.tone}
               errors={formState.errors.orders}
+            />
+            <input
+              ref={orderImportInputRef}
+              type="file"
+              className="hidden"
+              accept="application/json,.json"
+              onChange={(event) => {
+                void handleOrderImportFile(event.target.files?.[0]);
+              }}
             />
           </div>
         </section>

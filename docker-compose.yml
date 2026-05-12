@@ -19,7 +19,8 @@ services:
   planner-backend:
     profiles: ["standalone"]
     build:
-      context: ./backend
+      context: .
+      dockerfile: backend/Dockerfile
     environment:
       APP_NAME: vrp_planner
       APP_ENV: dev

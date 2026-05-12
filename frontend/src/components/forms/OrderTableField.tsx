@@ -24,6 +24,7 @@ export function OrderTableField({
   setValue,
   spbuOptions,
   depotSelected,
+  onLoadImport,
   onLoadSample,
   sampleMessage,
   sampleMessageTone = "info",
@@ -34,6 +35,7 @@ export function OrderTableField({
   setValue: UseFormSetValue<OptimizationRequest>;
   spbuOptions: SpbuData[];
   depotSelected: boolean;
+  onLoadImport?: () => void;
   onLoadSample?: () => void;
   sampleMessage?: string | null;
   sampleMessageTone?: "info" | "error";
@@ -59,6 +61,11 @@ export function OrderTableField({
           <p className="text-sm text-slate-500">Input kebutuhan BBM per SPBU.</p>
         </div>
         <div className="flex gap-3">
+          {onLoadImport ? (
+            <button type="button" className="btn-secondary" onClick={onLoadImport}>
+              Load Import Data
+            </button>
+          ) : null}
           {onLoadSample ? (
             <button type="button" className="btn-secondary" onClick={onLoadSample}>
               Load Sample Data

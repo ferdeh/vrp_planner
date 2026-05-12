@@ -54,6 +54,13 @@ export async function getRepositoryVersions() {
   return data;
 }
 
+export async function downloadSolverGuidePdf() {
+  const { data } = await api.get<Blob>("/api/v1/user-guide/solver-guide.pdf", {
+    responseType: "blob",
+  });
+  return data;
+}
+
 export async function optimize(payload: OptimizationRequest) {
   const { data } = await api.post<OptimizationJobResponse>("/api/v1/optimize", payload);
   return data;

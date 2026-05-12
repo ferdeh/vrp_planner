@@ -121,6 +121,15 @@ def test_version_endpoint_returns_repository_metadata(client, monkeypatch):
     assert payload["repositories"][1]["available"] is False
 
 
+def test_solver_guide_pdf_download_returns_pdf(client):
+    response = client.get("/api/v1/user-guide/solver-guide.pdf")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/pdf"
+    assert "vrp-planner-solver-guide.pdf" in response.headers["content-disposition"]
+    assert response.content.startswith(b"%PDF")
+
+
 def test_optimize_endpoint_and_scenario_detail(client, sample_payload):
     optimize_response = client.post("/api/v1/optimize", json=sample_payload)
     assert optimize_response.status_code == 202
