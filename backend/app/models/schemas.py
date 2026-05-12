@@ -469,6 +469,7 @@ class DeleteScenariosResponse(BaseModel):
 class ScenarioDetailResponse(OptimizationResultResponse):
     dispatch_date: date
     depot_id: str
+    depot_name: str | None = None
     depot_service_time_minutes: int = 0
     input_orders: list[OrderInput]
     input_trucks: list[TruckInput]

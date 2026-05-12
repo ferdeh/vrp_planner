@@ -372,6 +372,7 @@ export interface ScenarioQueryResponse {
 export interface ScenarioDetailResponse extends OptimizationResultResponse {
   dispatch_date: string;
   depot_id: string;
+  depot_name?: string | null;
   depot_service_time_minutes: number;
   input_orders: OrderInput[];
   input_trucks: TruckInput[];

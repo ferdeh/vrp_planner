@@ -12,9 +12,10 @@ import { OrderTableField } from "../components/forms/OrderTableField";
 import { TruckTableField } from "../components/forms/TruckTableField";
 import { OptimizationConfigPanel } from "../components/forms/OptimizationConfigPanel";
 import { useDepotOptions, useSpbuOptions } from "../hooks/useMasterData";
+import { importNamesMatch, normalizeImportKey, parseOrderImportFile, type ParsedOrderImport } from "../lib/orderExcel";
 import { defaultOptimizationConfig } from "../lib/sampleData";
-import { getSettings, getSolverSettings, listAvailableTrucks, solveVrp } from "../services/api";
-import type { DepotData, OptimizationRequest, OrderInput, SolverSettings, SpbuData, TruckMasterData } from "../types/api";
+import { getSettings, getSolverSettings, listAvailableTrucks, listDepots, listSpbu, solveVrp } from "../services/api";
+import type { DepotData, OptimizationRequest, SolverSettings, SpbuData, TruckMasterData } from "../types/api";
 
 const SAMPLE_ORDER_VOLUME_KL = 8;
 
@@ -106,83 +107,10 @@ type RerunLocationState = {
   rerunPayload?: OptimizationRequest;
 } | null;
 
-type OrderImportResult = {
-  dispatchDate?: string;
-  depotId?: string;
-  orders: OrderInput[];
+type ImportDepotResolution = {
+  depot: DepotData;
+  spbuItems?: SpbuData[];
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function readStringField(record: Record<string, unknown>, key: string, fallback = "") {
-  const value = record[key];
-  return value === null || value === undefined ? fallback : String(value);
-}
-
-function readNumberField(record: Record<string, unknown>, key: string, fallback: number) {
-  const value = Number(record[key]);
-  return Number.isFinite(value) ? value : fallback;
-}
-
-function readBooleanField(record: Record<string, unknown>, key: string) {
-  const value = record[key];
-  if (typeof value === "boolean") {
-    return value;
-  }
-  if (typeof value === "string") {
-    return value.toLowerCase() === "true" || value === "1";
-  }
-  return Boolean(value);
-}
-
-function parseOrderImportPayload(payload: unknown): OrderImportResult {
-  const sourceOrders = Array.isArray(payload)
-    ? payload
-    : isRecord(payload) && Array.isArray(payload.orders)
-      ? payload.orders
-      : null;
-
-  if (!sourceOrders?.length) {
-    throw new Error("File import tidak berisi data orders.");
-  }
-
-  const orders = sourceOrders.map((item, index) => {
-    if (!isRecord(item)) {
-      throw new Error(`Order baris ${index + 1} tidak valid.`);
-    }
-
-    const orderId = readStringField(item, "order_id");
-    const spbuId = readStringField(item, "spbu_id");
-    const productType = readStringField(item, "product_type");
-    const demandKl = readNumberField(item, "demand_kl", Number.NaN);
-
-    if (!orderId || !spbuId || !productType || !Number.isFinite(demandKl) || demandKl <= 0) {
-      throw new Error(`Order baris ${index + 1} wajib memiliki order_id, spbu_id, product_type, dan demand_kl.`);
-    }
-
-    const priority = readBooleanField(item, "priority");
-
-    return {
-      order_id: orderId,
-      spbu_id: spbuId,
-      product_type: productType,
-      demand_kl: demandKl,
-      priority,
-      eta: priority ? readStringField(item, "eta") : "",
-      service_time_minutes: readNumberField(item, "service_time_minutes", 30),
-      time_window_start: readStringField(item, "time_window_start", "08:00"),
-      time_window_end: readStringField(item, "time_window_end", "17:00"),
-    };
-  });
-
-  return {
-    dispatchDate: isRecord(payload) ? readStringField(payload, "dispatch_date") || undefined : undefined,
-    depotId: isRecord(payload) ? readStringField(payload, "depot_id") || undefined : undefined,
-    orders,
-  };
-}
 
 const schema = z.object({
   dispatch_date: z.string().min(1),
@@ -261,6 +189,67 @@ const defaultSolverSettings: SolverSettings = {
   cluster_mode: "soft",
   max_cluster_size: 5,
 };
+
+function findDepotByName(depots: DepotData[], depotName: string | undefined) {
+  const normalizedName = normalizeImportKey(depotName);
+  if (!normalizedName) {
+    return undefined;
+  }
+  return depots.find((item) => importNamesMatch(item.name, normalizedName));
+}
+
+function findDepotByCode(depots: DepotData[], depotCode: string | undefined) {
+  if (!depotCode) {
+    return undefined;
+  }
+  return depots.find((item) => String(item.depot_id) === String(depotCode));
+}
+
+function findSpbuByImportName(spbuItems: SpbuData[], spbuName: string | null | undefined, spbuCode: string | undefined) {
+  const normalizedName = normalizeImportKey(spbuName);
+  if (normalizedName) {
+    const byName = spbuItems.find((item) => importNamesMatch(item.name, normalizedName));
+    if (byName) {
+      return byName;
+    }
+  }
+  if (spbuCode) {
+    return spbuItems.find((item) => String(item.spbu_id) === String(spbuCode));
+  }
+  return undefined;
+}
+
+async function inferDepotFromSpbuNames(depots: DepotData[], importData: ParsedOrderImport) {
+  const spbuNames = new Set<string>(
+    importData.orders
+      .map((order) => normalizeImportKey(order.spbu_name))
+      .filter((name): name is string => Boolean(name)),
+  );
+
+  let bestMatch: ImportDepotResolution | null = null;
+  let bestScore = 0;
+  let isTie = false;
+
+  for (const depot of depots) {
+    const candidateSpbuItems = (await listSpbu(String(depot.depot_id)) as unknown) as SpbuData[];
+    const score = Array.from(spbuNames).filter((name) =>
+      candidateSpbuItems.some((item) => importNamesMatch(item.name, name)),
+    ).length;
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestMatch = { depot, spbuItems: candidateSpbuItems };
+      isTie = false;
+    } else if (score > 0 && score === bestScore) {
+      isTie = true;
+    }
+  }
+
+  if (!bestMatch || bestScore <= 0 || isTie) {
+    return null;
+  }
+  return bestMatch;
+}
 
 export function NewOptimizationPage() {
   const navigate = useNavigate();
@@ -482,14 +471,71 @@ export function NewOptimizationPage() {
     orderImportInputRef.current?.click();
   };
 
+  const resolveImportDepot = async (importResult: ParsedOrderImport): Promise<ImportDepotResolution> => {
+    const depots = (depotQuery.data as DepotData[] | undefined) ?? (await listDepots());
+    const byName = findDepotByName(depots, importResult.depotName);
+    if (byName) {
+      return { depot: byName };
+    }
+
+    if (!importResult.depotName && depotId) {
+      const selected = depots.find((item) => String(item.depot_id) === depotId);
+      if (selected) {
+        return { depot: selected };
+      }
+    }
+
+    const byCode = findDepotByCode(depots, importResult.depotCode);
+    if (byCode) {
+      return { depot: byCode };
+    }
+
+    const inferred = await inferDepotFromSpbuNames(depots, importResult);
+    if (inferred) {
+      return inferred;
+    }
+
+    throw new Error(
+      importResult.depotName
+        ? `Depot "${importResult.depotName}" tidak ditemukan di master data lokal.`
+        : "Depot tidak bisa ditentukan dari file. Pilih depot lokal terlebih dahulu lalu ulangi import.",
+    );
+  };
+
   const handleOrderImportFile = async (file: File | undefined) => {
     if (!file) {
       return;
     }
 
     try {
-      const parsed = JSON.parse(await file.text()) as unknown;
-      const importResult = parseOrderImportPayload(parsed);
+      const importResult = await parseOrderImportFile(file);
+      const resolvedDepot = await resolveImportDepot(importResult);
+      const resolvedDepotId = String(resolvedDepot.depot.depot_id);
+      const localSpbuItems = resolvedDepot.spbuItems ?? ((await listSpbu(resolvedDepotId) as unknown) as SpbuData[]);
+      const missingSpbuNames: string[] = [];
+      const importedOrders = importResult.orders.map((order) => {
+        const matchedSpbu = findSpbuByImportName(localSpbuItems, order.spbu_name, order.spbu_id);
+        if (!matchedSpbu) {
+          missingSpbuNames.push(order.spbu_name || order.spbu_id || order.order_id);
+        }
+        return {
+          order_id: order.order_id,
+          spbu_id: matchedSpbu ? String(matchedSpbu.spbu_id) : "",
+          product_type: order.product_type,
+          demand_kl: order.demand_kl,
+          priority: order.priority,
+          eta: order.priority ? order.eta ?? "" : "",
+          service_time_minutes: order.service_time_minutes,
+          time_window_start: order.time_window_start,
+          time_window_end: order.time_window_end,
+        };
+      });
+
+      if (missingSpbuNames.length) {
+        throw new Error(
+          `SPBU berikut tidak ditemukan di depot ${resolvedDepot.depot.name}: ${Array.from(new Set(missingSpbuNames)).slice(0, 8).join(", ")}.`,
+        );
+      }
 
       if (importResult.dispatchDate) {
         form.setValue("dispatch_date", importResult.dispatchDate, {
@@ -497,26 +543,23 @@ export function NewOptimizationPage() {
           shouldValidate: true,
         });
       }
-      if (importResult.depotId) {
-        form.setValue("depot_id", importResult.depotId, {
-          shouldDirty: true,
-          shouldValidate: true,
-        });
-      }
-
-      form.setValue("orders", importResult.orders, {
+      form.setValue("depot_id", resolvedDepotId, {
+        shouldDirty: true,
+        shouldValidate: true,
+      });
+      form.setValue("orders", importedOrders, {
         shouldDirty: true,
         shouldValidate: true,
       });
       clearErrors(["dispatch_date", "depot_id", "orders"]);
       setOrderSampleMessage({
-        text: `${importResult.orders.length} order berhasil diimport dari ${file.name}.`,
+        text: `${importedOrders.length} order berhasil diimport dari ${file.name} untuk depot ${resolvedDepot.depot.name}.`,
         tone: "info",
       });
       setTruckSyncMessage(null);
     } catch (error) {
       setOrderSampleMessage({
-        text: error instanceof Error ? error.message : "Import order gagal. Pastikan file JSON berasal dari Download Order.",
+        text: error instanceof Error ? error.message : "Import order gagal. Pastikan file Excel berasal dari Download Order.",
         tone: "error",
       });
     } finally {
@@ -826,7 +869,7 @@ export function NewOptimizationPage() {
               ref={orderImportInputRef}
               type="file"
               className="hidden"
-              accept="application/json,.json"
+              accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,application/json,.json"
               onChange={(event) => {
                 void handleOrderImportFile(event.target.files?.[0]);
               }}

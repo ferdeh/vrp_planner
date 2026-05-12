@@ -1017,6 +1017,7 @@ class ResultService:
             scenario_id=UUID(scenario.id),
             dispatch_date=scenario.dispatch_date,
             depot_id=scenario.depot_id,
+            depot_name=depot_name,
             depot_service_time_minutes=depot_service_time_minutes,
             status=result.status,
             message=result.message,

@@ -19,11 +19,13 @@ import {
 } from "../lib/format";
 import {
   createScenarioAnalysis,
+  listDepots,
   getScenario,
   getScenarioRoutes,
   getScenarioAnalysis,
   listScenarioAnalyses,
 } from "../services/api";
+import { downloadOrderWorkbook } from "../lib/orderExcel";
 import type {
   AnalysisLevel,
   ScenarioAnalysisDetailResponse,
@@ -172,20 +174,6 @@ function sortDetailOrders(
     }
     return comparison * direction;
   });
-}
-
-function downloadJson(filename: string, payload: unknown) {
-  const blob = new Blob([JSON.stringify(payload, null, 2)], {
-    type: "application/json",
-  });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
 }
 
 function AnalysisResultView({
@@ -626,33 +614,20 @@ export function ScenarioDetailPage() {
     });
   };
 
-  const handleDownloadOrders = () => {
+  const handleDownloadOrders = async () => {
     if (!detail) {
       return;
     }
 
-    const exportPayload = {
-      type: "vrp-planner-order-import",
-      version: 1,
-      scenario_id: detail.scenario_id,
-      dispatch_date: detail.dispatch_date,
-      depot_id: detail.depot_id,
-      exported_at: new Date().toISOString(),
-      orders: detail.input_orders.map((order) => ({
-        order_id: order.order_id,
-        spbu_id: order.spbu_id,
-        spbu_name: order.spbu_name ?? null,
-        product_type: order.product_type,
-        demand_kl: order.demand_kl,
-        priority: order.priority,
-        eta: order.eta ?? "",
-        service_time_minutes: order.service_time_minutes,
-        time_window_start: order.time_window_start,
-        time_window_end: order.time_window_end,
-      })),
-    };
+    let depotName = detail.depot_name || detail.depot_id;
+    try {
+      const depots = await listDepots();
+      depotName = depots.find((item) => String(item.depot_id) === detail.depot_id)?.name ?? depotName;
+    } catch {
+      depotName = detail.depot_name || detail.depot_id;
+    }
 
-    downloadJson(`orders-${detail.dispatch_date}-${detail.scenario_id.slice(0, 8)}.json`, exportPayload);
+    downloadOrderWorkbook(detail, depotName);
   };
 
   return (
